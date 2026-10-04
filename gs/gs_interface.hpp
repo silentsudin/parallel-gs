@@ -207,6 +207,12 @@ struct VSyncInfo
 	// Also scan out the UI mask (1 where the UI drew last; needs set_motion_enabled) into
 	// ScanoutResult::ui.
 	bool scanout_ui = false;
+	// A progressive (double-strike) picture of 224-line fields (Road Trip recomp: the game's
+	// interlaced fields drawn alike, scanned out as whole pictures): with high_resolution_scanout,
+	// scan out twice as many lines as columns per pixel, so the picture keeps its shape: 2x and 4x
+	// SSAA give 640x448, 8x and 16x give 1280x896. Each output pixel takes the super-samples that
+	// fall inside it (several are averaged).
+	bool progressive_field_scanout = false;
 	uint32_t depth_zbp = 0;
 	uint32_t depth_psm = 0;
 };
@@ -270,6 +276,8 @@ public:
 	void reset_context_state();
 
 	void set_super_sampling_rate(SuperSampling super_sampling, bool ordered_grid, bool super_sampled_textures);
+	// The highest rate this device supports (set_super_sampling_rate clamps to it).
+	SuperSampling get_max_supported_super_sampling() const;
 	void set_debug_mode(const DebugMode &mode);
 	void set_hacks(const Hacks &hacks);
 

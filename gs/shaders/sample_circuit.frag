@@ -10,6 +10,7 @@
 #include "data_structures.h"
 #include "swizzle_utils.h"
 #include "utils.h"
+#include "scanout_sampling.h"
 
 layout(location = 0) out vec4 FragColor;
 
@@ -99,7 +100,9 @@ void main()
 {
     uvec2 super_sampled_coord = uvec2(gl_FragCoord.xy);
     uvec2 single_sampled_coord;
-    if (SUPER_SAMPLES >= 4)
+    if (SCAN_BY_SAMPLE_POSITION && SUPER_SAMPLES > 1)
+        single_sampled_coord = scan_single_sampled_coord(super_sampled_coord);
+    else if (SUPER_SAMPLES >= 4)
         single_sampled_coord = super_sampled_coord >> 1;
     else
         single_sampled_coord = super_sampled_coord;
@@ -116,7 +119,27 @@ void main()
     const int BASE_SSAA_LAYER = 2;
 #endif
 
-    if (SUPER_SAMPLES == 1)
+    if (SCAN_BY_SAMPLE_POSITION && SUPER_SAMPLES > 1)
+    {
+        if (super_sample_is_valid(addr))
+        {
+            uint mask = scan_samples_in_pixel(super_sampled_coord);
+            FragColor = vec4(0.0);
+            float n = 0.0;
+            for (uint i = 0u; i < SUPER_SAMPLES; i++)
+            {
+                if ((mask & (1u << i)) != 0u)
+                {
+                    FragColor += sample_vram(addr, BASE_SSAA_LAYER + i);
+                    n += 1.0;
+                }
+            }
+            FragColor /= max(n, 1.0);
+        }
+        else
+            FragColor = sample_vram(addr, 0);
+    }
+    else if (SUPER_SAMPLES == 1)
     {
         // SUPER_SAMPLES == 2 forces 1 path.
         FragColor = sample_vram(addr, 0);

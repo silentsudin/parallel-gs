@@ -62,6 +62,11 @@ bool GSInterface::init(Vulkan::Device *device, const GSOptions &options)
 	return true;
 }
 
+SuperSampling GSInterface::get_max_supported_super_sampling() const
+{
+	return renderer.get_max_supported_super_sampling();
+}
+
 void GSInterface::set_super_sampling_rate(SuperSampling super_sampling,
                                           bool ordered_grid, bool super_sampled_textures_)
 {

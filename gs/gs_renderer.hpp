@@ -568,6 +568,14 @@ private:
 	Vulkan::Program *sample_motion_quad = nullptr;
 	Vulkan::Program *sample_ui_quad = nullptr;
 	bool motion_enabled = false;
+	// Scanout scale of the current vsync: output pixels per frame-buffer pixel (log2, per axis).
+	// The original high-resolution scanout is 1, 1 (2x2 from the super-samples); a progressive
+	// field scanout (VSyncInfo::progressive_field_scanout) picks the samples per output pixel.
+	uint32_t scan_x_log2 = 0, scan_y_log2 = 0;
+	bool scan_by_sample_position = false;
+	uint32_t scan_rate_x_log2 = 0, scan_rate_y_log2 = 0;
+	void set_scanout_specialization(Vulkan::CommandBuffer &cmd) const;
+	bool fixed_wave32() const;
 	Vulkan::Program *weave_quad = nullptr;
 
 	void drain_compilation_tasks();

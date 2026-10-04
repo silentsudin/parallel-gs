@@ -341,12 +341,22 @@ void GSRenderer::invalidate_super_sampling_state(
 	device->wait_idle();
 }
 
+bool GSRenderer::fixed_wave32() const
+{
+	// Apple GPUs (MoltenVK) report subgroup sizes 4..32 without required-size support, but run
+	// compute 32 wide: with full subgroups required a subgroup always holds the 8 or 16 samples of
+	// a pixel (Road Trip recomp).
+	const auto &features = device->get_device_features();
+	return device->get_gpu_properties().vendorID == 0x106B && features.vk13_props.maxSubgroupSize == 32 &&
+	       device->supports_subgroup_size_log2(true, 2, 6);
+}
+
 SuperSampling GSRenderer::get_max_supported_super_sampling() const
 {
 	SuperSampling max_ssaa = SuperSampling::X4;
-	if (device->supports_subgroup_size_log2(true, 3, 6))
+	if (device->supports_subgroup_size_log2(true, 3, 6) || fixed_wave32())
 		max_ssaa = SuperSampling::X8;
-	if (device->supports_subgroup_size_log2(true, 4, 6))
+	if (device->supports_subgroup_size_log2(true, 4, 6) || fixed_wave32())
 		max_ssaa = SuperSampling::X16;
 
 	return max_ssaa;
@@ -2583,6 +2593,8 @@ void GSRenderer::dispatch_shading(Vulkan::CommandBuffer &cmd, const RenderPass &
 		cmd.set_subgroup_size_log2(true, 6, 6);
 	else if (device->supports_subgroup_size_log2(true, minimum_subgroup_size_log2, 6))
 		cmd.set_subgroup_size_log2(true, minimum_subgroup_size_log2, 6);
+	else if (fixed_wave32())
+		cmd.set_subgroup_size_log2(true, 2, 6);
 
 	uint32_t color_psm = inst.fb.frame.desc.PSM;
 	uint32_t depth_psm = inst.fb.z.desc.PSM | ZBUFBits::PSM_MSB;
@@ -4148,6 +4160,17 @@ void GSRenderer::transfer_overlap_barrier()
 	stats.num_copy_barriers++;
 }
 
+void GSRenderer::set_scanout_specialization(Vulkan::CommandBuffer &cmd) const
+{
+	// 3: pick samples by position (progressive field scanout), 4/5: output pixels per frame-buffer
+	// pixel (log2), 6/7: the super-sampling rates (log2).
+	cmd.set_specialization_constant(3, uint32_t(scan_by_sample_position));
+	cmd.set_specialization_constant(4, scan_x_log2);
+	cmd.set_specialization_constant(5, scan_y_log2);
+	cmd.set_specialization_constant(6, scan_rate_x_log2);
+	cmd.set_specialization_constant(7, scan_rate_y_log2);
+}
+
 void GSRenderer::sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
                                      const SamplingRect &rect, uint32_t super_samples,
                                      const Vulkan::Image *promoted)
@@ -4173,15 +4196,16 @@ void GSRenderer::sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::I
 	auto valid_extent = rect.valid_extent;
 	if (super_samples > 1)
 	{
-		valid_extent.width *= 2;
-		valid_extent.height *= 2;
+		valid_extent.width <<= scan_x_log2;
+		valid_extent.height <<= scan_y_log2;
 	}
 	cmd.set_scissor({{ 0, 0 }, valid_extent });
 
-	cmd.set_specialization_constant_mask(0x7);
+	cmd.set_specialization_constant_mask(0xff);
 	cmd.set_specialization_constant(0, uint32_t(dispfb.PSM));
 	cmd.set_specialization_constant(1, vram_size - 1);
 	cmd.set_specialization_constant(2, super_samples);
+	set_scanout_specialization(cmd);
 
 	struct Registers
 	{
@@ -4288,14 +4312,15 @@ void GSRenderer::sample_crtc_ui(Vulkan::CommandBuffer &cmd, const Vulkan::Image 
 	auto valid_extent = rect.valid_extent;
 	if (super_samples > 1)
 	{
-		valid_extent.width *= 2;
-		valid_extent.height *= 2;
+		valid_extent.width <<= scan_x_log2;
+		valid_extent.height <<= scan_y_log2;
 	}
 	cmd.set_scissor({{ 0, 0 }, valid_extent });
-	cmd.set_specialization_constant_mask(0x7);
+	cmd.set_specialization_constant_mask(0xff);
 	cmd.set_specialization_constant(0, uint32_t(dispfb.PSM));
 	cmd.set_specialization_constant(1, vram_size - 1);
 	cmd.set_specialization_constant(2, super_samples);
+	set_scanout_specialization(cmd);
 	struct Registers
 	{
 		uint32_t fbp, fbw, dbx, dby, phase, phase_stride;
@@ -4338,10 +4363,10 @@ void GSRenderer::merge_circuit1(Vulkan::CommandBuffer &cmd, Vulkan::ImageHandle 
 	vp.maxDepth = 1.0f;
 	if (high_resolution_scanout)
 	{
-		vp.x *= 2.0f;
-		vp.y *= 2.0f;
-		vp.width *= 2.0f;
-		vp.height *= 2.0f;
+		vp.x *= float(1u << scan_x_log2);
+		vp.y *= float(1u << scan_y_log2);
+		vp.width *= float(1u << scan_x_log2);
+		vp.height *= float(1u << scan_y_log2);
 		if (field_aware_rendering && !vsync.phase)
 			vp.y -= 1.0f;
 	}
@@ -4377,15 +4402,16 @@ void GSRenderer::sample_crtc_depth(Vulkan::CommandBuffer &cmd, const Vulkan::Ima
 	auto valid_extent = rect.valid_extent;
 	if (super_samples > 1)
 	{
-		valid_extent.width *= 2;
-		valid_extent.height *= 2;
+		valid_extent.width <<= scan_x_log2;
+		valid_extent.height <<= scan_y_log2;
 	}
 	cmd.set_scissor({{ 0, 0 }, valid_extent });
 
-	cmd.set_specialization_constant_mask(0x7);
+	cmd.set_specialization_constant_mask(0xff);
 	cmd.set_specialization_constant(0, zpsm);
 	cmd.set_specialization_constant(1, vram_size - 1);
 	cmd.set_specialization_constant(2, super_samples);
+	set_scanout_specialization(cmd);
 
 	struct Registers
 	{
@@ -4547,6 +4573,22 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 	if (high_resolution_scanout)
 		super_samples = 1 << (sampling_rate_x_log2 + sampling_rate_y_log2);
 
+	scan_x_log2 = scan_y_log2 = high_resolution_scanout ? 1u : 0u;
+	scan_by_sample_position = false;
+	scan_rate_x_log2 = sampling_rate_x_log2;
+	scan_rate_y_log2 = sampling_rate_y_log2;
+	if (info.progressive_field_scanout && info.high_resolution_scanout && force_progressive && double_strike &&
+	    !priv.extwrite.WRITE && sampling_rate_y_log2)
+	{
+		// Twice as many lines as columns: the fields are half height.
+		scan_y_log2 = std::min<uint32_t>(sampling_rate_y_log2, sampling_rate_x_log2 + 1);
+		scan_x_log2 = scan_y_log2 - 1;
+		scan_by_sample_position = true;
+		high_resolution_scanout = true;
+		field_aware_rendering = false;
+		super_samples = 1 << (sampling_rate_x_log2 + sampling_rate_y_log2);
+	}
+
 	if (promoted1 && promoted1->get_create_info().layers < super_samples)
 		promoted1 = nullptr;
 	if (promoted2 && promoted2->get_create_info().layers < super_samples)
@@ -4653,6 +4695,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 		high_resolution_scanout = false;
 		field_aware_rendering = false;
 		super_samples = 1;
+		scan_x_log2 = scan_y_log2 = 0;
+		scan_by_sample_position = false;
 	}
 	else if (priv.smode1.CMOD == SMODE1Bits::CMOD_PROGRESSIVE && priv.smode1.LC == SMODE1Bits::LC_VGA)
 	{
@@ -4873,8 +4917,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 		{
 			if (high_resolution_scanout)
 			{
-				image_info.width *= 2;
-				image_info.height *= 2;
+				image_info.width <<= scan_x_log2;
+				image_info.height <<= scan_y_log2;
 			}
 			circuit1 = device->create_image(image_info);
 			sample_crtc_circuit(cmd, *circuit1, priv.dispfb1, rect, super_samples, promoted1);
@@ -4958,8 +5002,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 		{
 			if (high_resolution_scanout)
 			{
-				image_info.width *= 2;
-				image_info.height *= 2;
+				image_info.width <<= scan_x_log2;
+				image_info.height <<= scan_y_log2;
 			}
 			circuit2 = device->create_image(image_info);
 			sample_crtc_circuit(cmd, *circuit2, priv.dispfb2, rect, super_samples, promoted2);
@@ -5020,8 +5064,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 		// Need to do all the CRTC offset math in single sampled domain to avoid lots of confusing cases later.
 		if (high_resolution_scanout)
 		{
-			horiz_resolution0 >>= 1;
-			horiz_resolution1 >>= 1;
+			horiz_resolution0 >>= scan_x_log2;
+			horiz_resolution1 >>= scan_x_log2;
 		}
 
 		uint32_t magh1 = priv.display1.MAGH + 1;
@@ -5068,8 +5112,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 
 		if (high_resolution_scanout)
 		{
-			effective_mode_width *= 2;
-			effective_mode_height *= 2;
+			effective_mode_width <<= scan_x_log2;
+			effective_mode_height <<= scan_y_log2;
 		}
 
 		bool is_raw_circuit1 =
@@ -5092,8 +5136,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 			                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 			                  info.dst_stage, info.dst_access);
 
-			result.internal_width = result.image->get_width() >> int(high_resolution_scanout);
-			result.internal_height = result.image->get_height() >> int(high_resolution_scanout);
+			result.internal_width = result.image->get_width() >> scan_x_log2;
+			result.internal_height = result.image->get_height() >> scan_y_log2;
 			result.double_strike = double_strike;
 
 			flush_submit(0);
@@ -5103,8 +5147,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 
 	result.internal_width = mode_width;
 	result.internal_height = mode_height;
-	image_info.width = mode_width << int(high_resolution_scanout);
-	image_info.height = mode_height << int(high_resolution_scanout);
+	image_info.width = mode_width << scan_x_log2;
+	image_info.height = mode_height << scan_y_log2;
 
 	if (field_aware_rendering)
 	{
@@ -5175,10 +5219,10 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 
 			if (high_resolution_scanout)
 			{
-				vp.x *= 2.0f;
-				vp.y *= 2.0f;
-				vp.width *= 2.0f;
-				vp.height *= 2.0f;
+				vp.x *= float(1u << scan_x_log2);
+				vp.y *= float(1u << scan_y_log2);
+				vp.width *= float(1u << scan_x_log2);
+				vp.height *= float(1u << scan_y_log2);
 
 				if (field_aware_rendering && !info.phase)
 					vp.y -= 1.0f;
@@ -5208,10 +5252,10 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 
 			if (high_resolution_scanout)
 			{
-				vp.x *= 2.0f;
-				vp.y *= 2.0f;
-				vp.width *= 2.0f;
-				vp.height *= 2.0f;
+				vp.x *= float(1u << scan_x_log2);
+				vp.y *= float(1u << scan_y_log2);
+				vp.width *= float(1u << scan_x_log2);
+				vp.height *= float(1u << scan_y_log2);
 
 				if (field_aware_rendering && !info.phase)
 					vp.y -= 1.0f;

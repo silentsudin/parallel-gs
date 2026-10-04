@@ -10,6 +10,7 @@
 #include "data_structures.h"
 #include "swizzle_utils.h"
 #include "utils.h"
+#include "scanout_sampling.h"
 
 layout(location = 0) out vec4 FragDepth;
 
@@ -58,13 +59,16 @@ bool super_sample_is_valid(uint addr)
 void main()
 {
     uvec2 super_sampled_coord = uvec2(gl_FragCoord.xy);
-    uvec2 single_sampled_coord = SUPER_SAMPLES >= 4 ? (super_sampled_coord >> 1) : super_sampled_coord;
+    uvec2 single_sampled_coord = SCAN_BY_SAMPLE_POSITION && SUPER_SAMPLES > 1 ? scan_single_sampled_coord(super_sampled_coord)
+                               : SUPER_SAMPLES >= 4 ? (super_sampled_coord >> 1) : super_sampled_coord;
     uvec2 coord = single_sampled_coord * uvec2(1u, registers.phase_stride) +
         uvec2(registers.dbx, registers.dby + registers.phase);
     uint addr = swizzle_PS2(coord.x, coord.y, registers.zbp * PGS_BLOCKS_PER_PAGE, registers.fbw, PSM, VRAM_MASK);
 
     uint z;
-    if (SUPER_SAMPLES >= 4 && super_sample_is_valid(addr))
+    if (SCAN_BY_SAMPLE_POSITION && SUPER_SAMPLES > 1 && super_sample_is_valid(addr))
+        z = read_z(addr, 2u + uint(findLSB(scan_samples_in_pixel(super_sampled_coord))));
+    else if (SUPER_SAMPLES >= 4 && super_sample_is_valid(addr))
     {
         uint quad_offset;
         if (SUPER_SAMPLES != 8)
