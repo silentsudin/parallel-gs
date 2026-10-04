@@ -278,6 +278,8 @@ public:
 	void set_super_sampling_rate(SuperSampling super_sampling, bool ordered_grid, bool super_sampled_textures);
 	// The highest rate this device supports (set_super_sampling_rate clamps to it).
 	SuperSampling get_max_supported_super_sampling() const;
+	// See GSRenderer::owns_frame_contexts.
+	void set_owns_frame_contexts(bool owns);
 	void set_debug_mode(const DebugMode &mode);
 	void set_hacks(const Hacks &hacks);
 

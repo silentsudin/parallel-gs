@@ -331,6 +331,7 @@ public:
 	void invalidate_super_sampling_state(uint32_t sampling_rate_x_log2, uint32_t sampling_rate_y_log2);
 
 	SuperSampling get_max_supported_super_sampling() const;
+	void set_owns_frame_contexts(bool owns) { owns_frame_contexts = owns; }
 
 	void set_field_aware_super_sampling(bool enable);
 
@@ -576,6 +577,10 @@ private:
 	uint32_t scan_rate_x_log2 = 0, scan_rate_y_log2 = 0;
 	void set_scanout_specialization(Vulkan::CommandBuffer &cmd) const;
 	bool fixed_wave32() const;
+	// False for a second renderer on a device another one drives (Road Trip recomp: shadow
+	// frames): its submits don't advance the device's frame contexts, each of which waits for the
+	// GPU work of an older context.
+	bool owns_frame_contexts = true;
 	Vulkan::Program *weave_quad = nullptr;
 
 	void drain_compilation_tasks();

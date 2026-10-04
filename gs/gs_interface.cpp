@@ -62,6 +62,11 @@ bool GSInterface::init(Vulkan::Device *device, const GSOptions &options)
 	return true;
 }
 
+void GSInterface::set_owns_frame_contexts(bool owns)
+{
+	renderer.set_owns_frame_contexts(owns);
+}
+
 SuperSampling GSInterface::get_max_supported_super_sampling() const
 {
 	return renderer.get_max_supported_super_sampling();

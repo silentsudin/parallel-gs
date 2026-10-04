@@ -344,11 +344,12 @@ void GSRenderer::invalidate_super_sampling_state(
 bool GSRenderer::fixed_wave32() const
 {
 	// Apple GPUs (MoltenVK) report subgroup sizes 4..32 without required-size support, but run
-	// compute 32 wide: with full subgroups required a subgroup always holds the 8 or 16 samples of
-	// a pixel (Road Trip recomp).
+	// compute 32 wide (Metal's threadExecutionWidth; MoltenVK reports it as the default subgroup
+	// size): with full subgroups required a subgroup always holds the 8 or 16 samples of a pixel
+	// (Road Trip recomp). Verified on an M3 Max.
 	const auto &features = device->get_device_features();
-	return device->get_gpu_properties().vendorID == 0x106B && features.vk13_props.maxSubgroupSize == 32 &&
-	       device->supports_subgroup_size_log2(true, 2, 6);
+	return device->get_gpu_properties().vendorID == 0x106B && features.vk11_props.subgroupSize == 32 &&
+	       features.vk13_props.maxSubgroupSize == 32 && device->supports_subgroup_size_log2(true, 2, 6);
 }
 
 SuperSampling GSRenderer::get_max_supported_super_sampling() const
@@ -1225,7 +1226,7 @@ void GSRenderer::flush_submit(uint64_t value)
 
 	// If we have a timeline trace, we'd like it to be somewhat readable.
 	// Only do garbage collection at frame boundaries.
-	if (!device->get_system_handles().timeline_trace_file)
+	if (!device->get_system_handles().timeline_trace_file && owns_frame_contexts)
 		device->next_frame_context();
 
 	log_timestamps();
