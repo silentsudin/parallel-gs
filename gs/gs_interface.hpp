@@ -195,6 +195,14 @@ struct VSyncInfo
 	// If using interlaced, defer any attempt to deinterlace and just return the raw output as-is with phase information.
 	// User is responsible for deinterlacing in whatever way is appropriate.
 	bool skip_deinterlace;
+
+	// Also scan out the depth buffer behind circuit 1 (Road Trip recomp, for temporal upscalers):
+	// the Z buffer at page `depth_zbp` in format `depth_psm` (PSMZ32/24/16/16S), sampled exactly as
+	// the colour is (same pixels, super-samples, merge viewport), into ScanoutResult::depth (R32F,
+	// raw Z values, 0 where nothing was scanned out). In layout dst_layout like the colour image.
+	bool scanout_depth = false;
+	uint32_t depth_zbp = 0;
+	uint32_t depth_psm = 0;
 };
 
 struct GSOptions
@@ -296,6 +304,9 @@ public:
 	const GIFPath &get_gif_path(uint32_t path) const;
 
 	ScanoutResult vsync(const VSyncInfo &info);
+	// Road Trip recomp: keep the Z buffer of the frame just finished for VSyncInfo::scanout_depth
+	// (games clear Z for the next frame before it is displayed). Call after flush().
+	void snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height);
 	bool vsync_can_skip(const VSyncInfo &info) const;
 
 	FlushStats consume_flush_stats();

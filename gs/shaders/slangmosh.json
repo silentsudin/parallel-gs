@@ -61,6 +61,10 @@
 			"path": "blit_circuit.frag"
 		},
 		{
+			"name": "sample_depth",
+			"path": "sample_depth.frag"
+		},
+		{
 			"name": "weave",
 			"path": "weave.frag"
 		},

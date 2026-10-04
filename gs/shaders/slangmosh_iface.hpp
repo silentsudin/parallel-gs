@@ -23,6 +23,7 @@ struct Shaders
 	Shader quad = {};
 	Shader sample_circuit[2] = {};
 	Shader blit_circuit = {};
+	Shader sample_depth = {};
 	Shader weave = {};
 	Shader sharpen_vert = {};
 	Shader sharpen_frag = {};

@@ -792,6 +792,7 @@ bool GSRenderer::init(Vulkan::Device *device_, const GSOptions &options)
 	blit_quad = device_->request_program(shaders.quad, shaders.blit_circuit);
 	sample_quad[0] = device_->request_program(shaders.quad, shaders.sample_circuit[0]);
 	sample_quad[1] = device_->request_program(shaders.quad, shaders.sample_circuit[1]);
+	sample_depth_quad = device_->request_program(shaders.quad, shaders.sample_depth);
 	weave_quad = device_->request_program(shaders.quad, shaders.weave);
 
 	flush_submit(0);
@@ -4185,6 +4186,95 @@ void GSRenderer::sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::I
 	cmd.end_render_pass();
 }
 
+void GSRenderer::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height)
+{
+	if (!device)
+		return;
+	ensure_command_buffer(direct_cmd, Vulkan::CommandBuffer::Type::Generic);
+	auto &cmd = *direct_cmd;
+
+	const VkDeviceSize main_size = buffers.gpu->get_create_info().size / 2; // without the hazard shadow copy
+	if (!buffers.depth_snapshot)
+	{
+		Vulkan::BufferCreateInfo info = {};
+		info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		info.size = main_size;
+		info.domain = Vulkan::BufferDomain::Device;
+		info.misc = Vulkan::BUFFER_MISC_ZERO_INITIALIZE_BIT;
+		buffers.depth_snapshot = device->create_buffer(info);
+		device->set_name(*buffers.depth_snapshot, "depth-snapshot");
+	}
+
+	// Pages of 8 KiB; 32-line pages for 24/32-bit Z (16-bit Z pages are taller, so this covers them).
+	const VkDeviceSize offset = VkDeviceSize(zbp) * PGS_PAGE_ALIGNMENT_BYTES;
+	if (offset >= vram_size)
+		return;
+	const VkDeviceSize size = std::min<VkDeviceSize>(VkDeviceSize(std::max(fbw, 1u)) * ((height + 31) / 32) * PGS_PAGE_ALIGNMENT_BYTES,
+	                                                 vram_size - offset);
+	cmd.barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+	            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+	for (VkDeviceSize slice = 0; slice < main_size / vram_size; slice++)
+		cmd.copy_buffer(*buffers.depth_snapshot, slice * vram_size + offset, *buffers.gpu, slice * vram_size + offset, size);
+	cmd.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+	            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+}
+
+void GSRenderer::sample_crtc_depth(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
+                                   uint32_t zbp, uint32_t zpsm, const SamplingRect &rect, uint32_t super_samples)
+{
+	cmd.image_barrier(img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+	                  0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+
+	Vulkan::RenderPassInfo rp_info;
+	rp_info.num_color_attachments = 1;
+	rp_info.color_attachments[0] = &img.get_view();
+	rp_info.store_attachments = 1u << 0;
+	rp_info.clear_attachments = 1u << 0;
+	cmd.begin_render_pass(rp_info);
+
+	cmd.set_opaque_sprite_state();
+	cmd.set_program(sample_depth_quad);
+	// The snapshot taken when the frame was finished (the game clears Z for the next one early).
+	cmd.set_storage_buffer(0, 0, buffers.depth_snapshot ? *buffers.depth_snapshot : *buffers.gpu);
+
+	auto valid_extent = rect.valid_extent;
+	if (super_samples > 1)
+	{
+		valid_extent.width *= 2;
+		valid_extent.height *= 2;
+	}
+	cmd.set_scissor({{ 0, 0 }, valid_extent });
+
+	cmd.set_specialization_constant_mask(0x7);
+	cmd.set_specialization_constant(0, zpsm);
+	cmd.set_specialization_constant(1, vram_size - 1);
+	cmd.set_specialization_constant(2, super_samples);
+
+	struct Registers
+	{
+		uint32_t zbp;
+		uint32_t fbw;
+		uint32_t dbx;
+		uint32_t dby;
+		uint32_t phase;
+		uint32_t phase_stride;
+	} push = {};
+
+	// The Z buffer is addressed with the frame buffer's stride.
+	push.zbp = zbp;
+	push.fbw = uint32_t(dispfb.FBW);
+	push.dbx = uint32_t(dispfb.DBX);
+	push.dby = uint32_t(dispfb.DBY);
+	push.phase = rect.phase_offset;
+	push.phase_stride = rect.phase_stride;
+	cmd.push_constants(&push, 0, sizeof(push));
+
+	cmd.checkpoint("sample-crtc-depth");
+	cmd.draw(3);
+
+	cmd.end_render_pass();
+}
+
 GSRenderer::SamplingRect GSRenderer::compute_circuit_rect(const PrivRegisterState &priv, uint32_t phase,
                                                           const DISPLAYBits &display, bool force_progressive,
                                                           const Vulkan::Image *promoted)
@@ -4283,6 +4373,7 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 	image_info.misc |= Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT;
 
 	Vulkan::ImageHandle circuit1, circuit2;
+	Vulkan::ImageHandle depth_circuit1;
 
 	const bool force_progressive = info.force_progressive;
 	// True to include the overscan area.
@@ -4651,6 +4742,15 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 			circuit1 = device->create_image(image_info);
 			sample_crtc_circuit(cmd, *circuit1, priv.dispfb1, rect, super_samples, promoted1);
 			device->set_name(*circuit1, "Circuit1");
+			if (info.scanout_depth)
+			{
+				auto depth_info = image_info;
+				depth_info.format = VK_FORMAT_R32_SFLOAT;
+				depth_info.misc = 0;
+				depth_circuit1 = device->create_image(depth_info);
+				sample_crtc_depth(cmd, *depth_circuit1, priv.dispfb1, info.depth_zbp, info.depth_psm, rect, super_samples);
+				device->set_name(*depth_circuit1, "DepthCircuit1");
+			}
 		}
 
 		// TODO: Need subpixel clock shenanigans here I think ...
@@ -4995,6 +5095,52 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 
 	cmd.end_render_pass();
 
+	// Depth behind circuit 1, merged exactly as its colour (same viewport), nearest-sampled.
+	Vulkan::ImageHandle merged_depth;
+	if (depth_circuit1 && crtc_rects[0].extent.width && crtc_rects[0].extent.height)
+	{
+		auto depth_info = image_info;
+		depth_info.format = VK_FORMAT_R32_SFLOAT;
+		depth_info.misc = 0;
+		merged_depth = device->create_image(depth_info);
+		device->set_name(*merged_depth, "Merged depth");
+		cmd.image_barrier(*depth_circuit1, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+		                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+		cmd.image_barrier(*merged_depth, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+		                  0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+		Vulkan::RenderPassInfo drp = {};
+		drp.num_color_attachments = 1;
+		drp.color_attachments[0] = &merged_depth->get_view();
+		drp.clear_attachments = 1u << 0;
+		drp.store_attachments = 1u << 0;
+		cmd.begin_render_pass(drp);
+		cmd.set_opaque_sprite_state();
+		cmd.set_program(blit_quad);
+		cmd.set_texture(0, 0, depth_circuit1->get_view(), Vulkan::StockSampler::NearestClamp);
+		VkViewport vp = {};
+		vp.x = float(crtc_rects[0].offset.x);
+		vp.y = float(crtc_rects[0].offset.y);
+		vp.width = float(crtc_rects[0].extent.width);
+		vp.height = float(crtc_rects[0].extent.height);
+		vp.maxDepth = 1.0f;
+		if (high_resolution_scanout)
+		{
+			vp.x *= 2.0f;
+			vp.y *= 2.0f;
+			vp.width *= 2.0f;
+			vp.height *= 2.0f;
+			if (field_aware_rendering && !info.phase)
+				vp.y -= 1.0f;
+		}
+		cmd.set_viewport(vp);
+		cmd.draw(3);
+		cmd.end_render_pass();
+		cmd.image_barrier(*merged_depth, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, info.dst_layout,
+		                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		                  info.dst_stage, info.dst_access);
+	}
+
 	const bool need_intermediate_pass = priv.extwrite.WRITE || is_interlaced || force_deinterlace;
 	VkPipelineStageFlags2 dst_stage =
 			need_intermediate_pass ? VkPipelineStageFlags2(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT) : info.dst_stage;
@@ -5136,6 +5282,7 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 	}
 
 	result.image = std::move(merged);
+	result.depth = std::move(merged_depth);
 	result.interlaced = should_deinterlace;
 	result.interlace_phase = info.phase;
 	result.double_strike = double_strike;

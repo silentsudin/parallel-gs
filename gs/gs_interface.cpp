@@ -4719,3 +4719,8 @@ void GSInterface::set_signal_interface(SignalInterface *iface)
 	signal_interface = iface;
 }
 }
+
+void ParallelGS::GSInterface::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height)
+{
+	renderer.snapshot_depth(zbp, fbw, height);
+}
