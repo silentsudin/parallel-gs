@@ -25,6 +25,26 @@ layout(set = 0, binding = BINDING_VRAM, std430) buffer VRAM16
 } vram16;
 #endif
 
+#ifdef NEED_MOTION
+layout(set = 0, binding = BINDING_TRANSFORMED_MOTION, std430)
+PRIMITIVE_SETUP_QUALIFIER buffer TransformedMotion
+{
+	uvec4 data[];
+} transformed_motion;
+#endif
+
+#if defined(NEED_MOTION) && defined(NEED_VRAM)
+layout(set = 0, binding = BINDING_MOTION, std430) buffer MotionVRAM
+{
+	uint data[];
+} motion_vram;
+
+layout(set = 0, binding = BINDING_UI_MASK, std430) buffer UiMaskVRAM
+{
+	uint data[];
+} ui_mask_vram;
+#endif
+
 #ifdef NEED_PRIMITIVE_LIST
 layout(set = 0, binding = BINDING_COARSE_TILE_LIST, std430)
 PRIMITIVE_LIST_QUALIFIER buffer CoarseTileList

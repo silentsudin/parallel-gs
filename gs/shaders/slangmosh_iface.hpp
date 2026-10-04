@@ -24,6 +24,8 @@ struct Shaders
 	Shader sample_circuit[2] = {};
 	Shader blit_circuit = {};
 	Shader sample_depth = {};
+	Shader sample_motion = {};
+	Shader sample_ui = {};
 	Shader weave = {};
 	Shader sharpen_vert = {};
 	Shader sharpen_frag = {};

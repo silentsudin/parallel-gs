@@ -49,6 +49,11 @@ struct ScanoutResult
 
 	// With VSyncInfo::scanout_depth: the raw Z behind circuit 1, R32F, the size of image.
 	Vulkan::ImageHandle depth;
+	// With VSyncInfo::scanout_motion: per-pixel screen motion (GS pixels, current minus previous),
+	// RG16F, the size of image; 0 where nothing with motion was drawn.
+	Vulkan::ImageHandle motion;
+	// With VSyncInfo::scanout_ui: 1 where the UI (HUD, 2D screens) drew last, R8, the size of image.
+	Vulkan::ImageHandle ui;
 
 	// Pixel clock rate. Generally 13.5 MHz for interlaced 640x480 video and 27 MHz for progressive 640x480.
 	// If high_resolution_scanout is used, this may lower a bit to compensate. E.g. 512x448 might be 10.8 MHz.
@@ -308,6 +313,8 @@ public:
 	void end_host_write_vram_access();
 
 	// Copies the Z buffer's pages (all sample slices) aside, for a later depth scanout.
+	// Per-pixel motion from VertexPosition.padding (Road Trip recomp).
+	void set_motion_enabled(bool enable);
 	void snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height);
 	ScanoutResult vsync(const PrivRegisterState &priv, const VSyncInfo &info,
 	                    uint32_t sampling_rate_x_log2, uint32_t sampling_rate_y_log2,
@@ -405,6 +412,10 @@ private:
 		Vulkan::BufferHandle clut;
 		Vulkan::BufferHandle gpu;
 		Vulkan::BufferHandle depth_snapshot; // VRAM-shaped, Z pages only (snapshot_depth)
+		Vulkan::BufferHandle motion;          // per-pixel motion, Z-shaped (1 + samples slices)
+		Vulkan::BufferHandle motion_snapshot;
+		Vulkan::BufferHandle motion_dummy;    // bound while motion is off
+		Vulkan::BufferHandle ui_mask;         // per colour word: 1 = last written by the UI
 		Vulkan::BufferHandle cpu;
 		Vulkan::BufferHandle vram_copy_atomics;
 		Vulkan::BufferHandle vram_copy_payloads;
@@ -503,7 +514,13 @@ private:
 	};
 
 	void sample_crtc_depth(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
-	                       uint32_t zbp, uint32_t zpsm, const SamplingRect &rect, uint32_t super_samples);
+	                       uint32_t zbp, uint32_t zpsm, const SamplingRect &rect, uint32_t super_samples,
+	                       bool motion = false);
+	void sample_crtc_ui(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
+	                    const SamplingRect &rect, uint32_t super_samples);
+	void merge_circuit1(Vulkan::CommandBuffer &cmd, Vulkan::ImageHandle &out, const Vulkan::ImageCreateInfo &info,
+	                    const Vulkan::Image &circuit, const VkRect2D &crtc_rect, bool high_resolution_scanout,
+	                    bool field_aware_rendering, const VSyncInfo &vsync);
 	void sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img,
 	                         const DISPFBBits &dispfb, const SamplingRect &rect, uint32_t super_samples,
 	                         const Vulkan::Image *promoted);
@@ -548,6 +565,9 @@ private:
 	Vulkan::Program *blit_quad = nullptr;
 	Vulkan::Program *sample_quad[2] = {};
 	Vulkan::Program *sample_depth_quad = nullptr;
+	Vulkan::Program *sample_motion_quad = nullptr;
+	Vulkan::Program *sample_ui_quad = nullptr;
+	bool motion_enabled = false;
 	Vulkan::Program *weave_quad = nullptr;
 
 	void drain_compilation_tasks();

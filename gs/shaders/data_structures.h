@@ -134,6 +134,8 @@ struct GlobalConstants
 	int fb_color_page;
 	int fb_depth_page;
 	int fb_page_stride;
+	// Road Trip recomp: write per-pixel motion (VertexPosition.padding, interpolated) where Z is written.
+	int motion_enabled;
 };
 
 struct StateVector
@@ -390,6 +392,16 @@ CONSTEXPR int AFAIL_RGB_ONLY = 3;
 #define BINDING_SINGLE_SAMPLE_HEURISTIC 20
 #define BINDING_OPAQUE_FBMASKS 21
 #define BINDING_PHASE_LUT 22
+// Road Trip recomp: per-primitive vertex motion (3 x packed half2 in attribute order) and the
+// VRAM-shaped motion buffer (one packed half2 per 32-bit Z word; slice 0 = sample 0/resolved,
+// slice 1 + s = sample s).
+#define BINDING_TRANSFORMED_MOTION 23
+#define BINDING_MOTION 24
+// The UI mask (Road Trip recomp): per colour word, 1 where the last write came from the UI.
+#define BINDING_UI_MASK 25
+// Reserved per-vertex side values (not motion): UI vertices, and neutral ones (full-screen passes).
+#define VERTEX_SIDE_UI 0x7E017E01u
+#define VERTEX_SIDE_NEUTRAL 0x7E027E02u
 
 #define DESCRIPTOR_SET_IMAGES 1
 #define DESCRIPTOR_SET_WORKGROUP_LIST 2

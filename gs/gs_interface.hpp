@@ -201,6 +201,12 @@ struct VSyncInfo
 	// the colour is (same pixels, super-samples, merge viewport), into ScanoutResult::depth (R32F,
 	// raw Z values, 0 where nothing was scanned out). In layout dst_layout like the colour image.
 	bool scanout_depth = false;
+	// Also scan out per-pixel screen motion (needs set_motion_enabled and the depth fields) into
+	// ScanoutResult::motion.
+	bool scanout_motion = false;
+	// Also scan out the UI mask (1 where the UI drew last; needs set_motion_enabled) into
+	// ScanoutResult::ui.
+	bool scanout_ui = false;
 	uint32_t depth_zbp = 0;
 	uint32_t depth_psm = 0;
 };
@@ -307,6 +313,10 @@ public:
 	// Road Trip recomp: keep the Z buffer of the frame just finished for VSyncInfo::scanout_depth
 	// (games clear Z for the next frame before it is displayed). Call after flush().
 	void snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height);
+	// Per-vertex screen motion (packed half2, GS pixels) for the vertices of the next gif_transfer,
+	// in kick order, carried in VertexPosition.padding and written per pixel where Z is written.
+	void set_motion_enabled(bool enable);
+	void set_vertex_motion(const uint32_t *motion, size_t count);
 	bool vsync_can_skip(const VSyncInfo &info) const;
 
 	FlushStats consume_flush_stats();
@@ -609,6 +619,10 @@ private:
 		VertexAttribute attr[MaxEntries];
 		unsigned count = 0;
 	} vertex_queue;
+
+	// Per-vertex motion for the current gif_transfer (Road Trip recomp, set_vertex_motion).
+	const uint32_t *motion_stream = nullptr;
+	size_t motion_count = 0, motion_index = 0;
 
 	void handle_tex0_write(uint32_t ctx);
 	void handle_clut_upload(uint32_t ctx);

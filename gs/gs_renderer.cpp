@@ -793,6 +793,8 @@ bool GSRenderer::init(Vulkan::Device *device_, const GSOptions &options)
 	sample_quad[0] = device_->request_program(shaders.quad, shaders.sample_circuit[0]);
 	sample_quad[1] = device_->request_program(shaders.quad, shaders.sample_circuit[1]);
 	sample_depth_quad = device_->request_program(shaders.quad, shaders.sample_depth);
+	sample_motion_quad = device_->request_program(shaders.quad, shaders.sample_motion);
+	sample_ui_quad = device_->request_program(shaders.quad, shaders.sample_ui);
 	weave_quad = device_->request_program(shaders.quad, shaders.weave);
 
 	flush_submit(0);
@@ -1707,6 +1709,16 @@ void GSRenderer::bind_frame_resources(const RenderPass &rp)
 	cmd.set_sampler(0, BINDING_SAMPLER_LINEAR, Vulkan::StockSampler::LinearWrap);
 
 	cmd.set_storage_buffer(0, BINDING_VRAM, *buffers.gpu);
+	if (!buffers.motion_dummy)
+	{
+		Vulkan::BufferCreateInfo info = {};
+		info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		info.size = 256;
+		info.domain = Vulkan::BufferDomain::Device;
+		buffers.motion_dummy = device->create_buffer(info);
+	}
+	cmd.set_storage_buffer(0, BINDING_MOTION, motion_enabled ? *buffers.motion : *buffers.motion_dummy);
+	cmd.set_storage_buffer(0, BINDING_UI_MASK, motion_enabled ? *buffers.ui_mask : *buffers.motion_dummy);
 
 	triangle_setup_cmd->set_buffer_view(0, BINDING_FIXED_RCP_LUT, *buffers.fixed_rcp_lut_view);
 	triangle_setup_cmd->set_buffer_view(0, BINDING_FLOAT_RCP_LUT, *buffers.float_rcp_lut_view);
@@ -1766,6 +1778,7 @@ void GSRenderer::bind_frame_resources_instanced(const RenderPass &rp, uint32_t i
 	constants.fb_color_page = int(inst.fb.frame.desc.FBP);
 	constants.fb_depth_page = int(inst.fb.z.desc.ZBP);
 	constants.fb_page_stride = int(inst.fb.frame.desc.FBW);
+	constants.motion_enabled = motion_enabled ? 1 : 0;
 
 	*cmd.allocate_typed_constant_data<GlobalConstants>(0, BINDING_CONSTANTS, 1) = constants;
 	*binning_cmd->allocate_typed_constant_data<GlobalConstants>(0, BINDING_CONSTANTS, 1) = constants;
@@ -1791,6 +1804,14 @@ void GSRenderer::allocate_scratch_buffers(Vulkan::CommandBuffer &cmd, const Rend
 	                                       *buffers.device_scratch.buffer, transformed_attributes_offset, transformed_attributes_size);
 	binning_cmd->set_storage_buffer(0, BINDING_TRANSFORMED_ATTRIBUTES,
 	                                *buffers.device_scratch.buffer, transformed_attributes_offset, transformed_attributes_size);
+
+	// Per-primitive vertex motion (Road Trip recomp).
+	{
+		const VkDeviceSize size = 16 * std::max<uint32_t>(1, rp.num_primitives);
+		auto offset = allocate_device_scratch(size, buffers.device_scratch, nullptr);
+		cmd.set_storage_buffer(0, BINDING_TRANSFORMED_MOTION, *buffers.device_scratch.buffer, offset, size);
+		triangle_setup_cmd->set_storage_buffer(0, BINDING_TRANSFORMED_MOTION, *buffers.device_scratch.buffer, offset, size);
+	}
 
 	auto single_sampled_heuristic_offset =
 			allocate_device_scratch(sizeof(SingleSampleHeuristic), buffers.device_scratch, nullptr);
@@ -4186,6 +4207,31 @@ void GSRenderer::sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::I
 	cmd.end_render_pass();
 }
 
+void GSRenderer::set_motion_enabled(bool enable)
+{
+	if (enable && !buffers.motion)
+	{
+		// One slice per sample plus sample 0, each the size of VRAM.
+		const VkDeviceSize main_size = buffers.gpu->get_create_info().size / 2;
+		Vulkan::BufferCreateInfo info = {};
+		info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		info.size = std::max<VkDeviceSize>(vram_size, main_size - vram_size);
+		info.domain = Vulkan::BufferDomain::Device;
+		info.misc = Vulkan::BUFFER_MISC_ZERO_INITIALIZE_BIT;
+		buffers.motion = device->create_buffer(info);
+		device->set_name(*buffers.motion, "motion");
+		info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		buffers.motion_snapshot = device->create_buffer(info);
+		device->set_name(*buffers.motion_snapshot, "motion-snapshot");
+		// One uint per colour word (16-bit formats address in halves: twice the words).
+		info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		info.size = VkDeviceSize(vram_size) * 2;
+		buffers.ui_mask = device->create_buffer(info);
+		device->set_name(*buffers.ui_mask, "ui-mask");
+	}
+	motion_enabled = enable;
+}
+
 void GSRenderer::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height)
 {
 	if (!device)
@@ -4215,12 +4261,101 @@ void GSRenderer::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height)
 	            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
 	for (VkDeviceSize slice = 0; slice < main_size / vram_size; slice++)
 		cmd.copy_buffer(*buffers.depth_snapshot, slice * vram_size + offset, *buffers.gpu, slice * vram_size + offset, size);
+	if (motion_enabled)
+	{
+		const VkDeviceSize motion_size = buffers.motion->get_create_info().size;
+		for (VkDeviceSize slice = 0; slice < motion_size / vram_size; slice++)
+			cmd.copy_buffer(*buffers.motion_snapshot, slice * vram_size + offset, *buffers.motion, slice * vram_size + offset, size);
+	}
 	cmd.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 	            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
 }
 
+void GSRenderer::sample_crtc_ui(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
+                                const SamplingRect &rect, uint32_t super_samples)
+{
+	cmd.image_barrier(img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+	                  0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+	Vulkan::RenderPassInfo rp_info;
+	rp_info.num_color_attachments = 1;
+	rp_info.color_attachments[0] = &img.get_view();
+	rp_info.store_attachments = 1u << 0;
+	rp_info.clear_attachments = 1u << 0;
+	cmd.begin_render_pass(rp_info);
+	cmd.set_opaque_sprite_state();
+	cmd.set_program(sample_ui_quad);
+	cmd.set_storage_buffer(0, 0, *buffers.ui_mask);
+	auto valid_extent = rect.valid_extent;
+	if (super_samples > 1)
+	{
+		valid_extent.width *= 2;
+		valid_extent.height *= 2;
+	}
+	cmd.set_scissor({{ 0, 0 }, valid_extent });
+	cmd.set_specialization_constant_mask(0x7);
+	cmd.set_specialization_constant(0, uint32_t(dispfb.PSM));
+	cmd.set_specialization_constant(1, vram_size - 1);
+	cmd.set_specialization_constant(2, super_samples);
+	struct Registers
+	{
+		uint32_t fbp, fbw, dbx, dby, phase, phase_stride;
+	} push = {};
+	push.fbp = uint32_t(dispfb.FBP);
+	push.fbw = uint32_t(dispfb.FBW);
+	push.dbx = uint32_t(dispfb.DBX);
+	push.dby = uint32_t(dispfb.DBY);
+	push.phase = rect.phase_offset;
+	push.phase_stride = rect.phase_stride;
+	cmd.push_constants(&push, 0, sizeof(push));
+	cmd.draw(3);
+	cmd.end_render_pass();
+}
+
+void GSRenderer::merge_circuit1(Vulkan::CommandBuffer &cmd, Vulkan::ImageHandle &out, const Vulkan::ImageCreateInfo &info,
+                                const Vulkan::Image &circuit, const VkRect2D &crtc_rect, bool high_resolution_scanout,
+                                bool field_aware_rendering, const VSyncInfo &vsync)
+{
+	out = device->create_image(info);
+	cmd.image_barrier(circuit, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+	                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+	                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+	cmd.image_barrier(*out, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+	                  0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+	Vulkan::RenderPassInfo rp = {};
+	rp.num_color_attachments = 1;
+	rp.color_attachments[0] = &out->get_view();
+	rp.clear_attachments = 1u << 0;
+	rp.store_attachments = 1u << 0;
+	cmd.begin_render_pass(rp);
+	cmd.set_opaque_sprite_state();
+	cmd.set_program(blit_quad);
+	cmd.set_texture(0, 0, circuit.get_view(), Vulkan::StockSampler::NearestClamp);
+	VkViewport vp = {};
+	vp.x = float(crtc_rect.offset.x);
+	vp.y = float(crtc_rect.offset.y);
+	vp.width = float(crtc_rect.extent.width);
+	vp.height = float(crtc_rect.extent.height);
+	vp.maxDepth = 1.0f;
+	if (high_resolution_scanout)
+	{
+		vp.x *= 2.0f;
+		vp.y *= 2.0f;
+		vp.width *= 2.0f;
+		vp.height *= 2.0f;
+		if (field_aware_rendering && !vsync.phase)
+			vp.y -= 1.0f;
+	}
+	cmd.set_viewport(vp);
+	cmd.draw(3);
+	cmd.end_render_pass();
+	cmd.image_barrier(*out, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, vsync.dst_layout,
+	                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+	                  vsync.dst_stage, vsync.dst_access);
+}
+
 void GSRenderer::sample_crtc_depth(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
-                                   uint32_t zbp, uint32_t zpsm, const SamplingRect &rect, uint32_t super_samples)
+                                   uint32_t zbp, uint32_t zpsm, const SamplingRect &rect, uint32_t super_samples,
+                                   bool motion)
 {
 	cmd.image_barrier(img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
 	                  0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
@@ -4233,9 +4368,11 @@ void GSRenderer::sample_crtc_depth(Vulkan::CommandBuffer &cmd, const Vulkan::Ima
 	cmd.begin_render_pass(rp_info);
 
 	cmd.set_opaque_sprite_state();
-	cmd.set_program(sample_depth_quad);
+	cmd.set_program(motion ? sample_motion_quad : sample_depth_quad);
 	// The snapshot taken when the frame was finished (the game clears Z for the next one early).
 	cmd.set_storage_buffer(0, 0, buffers.depth_snapshot ? *buffers.depth_snapshot : *buffers.gpu);
+	if (motion)
+		cmd.set_storage_buffer(0, 1, *buffers.motion_snapshot);
 
 	auto valid_extent = rect.valid_extent;
 	if (super_samples > 1)
@@ -4373,7 +4510,7 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 	image_info.misc |= Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT;
 
 	Vulkan::ImageHandle circuit1, circuit2;
-	Vulkan::ImageHandle depth_circuit1;
+	Vulkan::ImageHandle depth_circuit1, motion_circuit1, ui_circuit1;
 
 	const bool force_progressive = info.force_progressive;
 	// True to include the overscan area.
@@ -4751,6 +4888,24 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 				sample_crtc_depth(cmd, *depth_circuit1, priv.dispfb1, info.depth_zbp, info.depth_psm, rect, super_samples);
 				device->set_name(*depth_circuit1, "DepthCircuit1");
 			}
+			if (info.scanout_ui && motion_enabled && buffers.ui_mask)
+			{
+				auto ui_info = image_info;
+				ui_info.format = VK_FORMAT_R8_UNORM;
+				ui_info.misc = 0;
+				ui_circuit1 = device->create_image(ui_info);
+				sample_crtc_ui(cmd, *ui_circuit1, priv.dispfb1, rect, super_samples);
+				device->set_name(*ui_circuit1, "UiCircuit1");
+			}
+			if (info.scanout_motion && motion_enabled && buffers.motion_snapshot)
+			{
+				auto motion_info = image_info;
+				motion_info.format = VK_FORMAT_R16G16_SFLOAT;
+				motion_info.misc = 0;
+				motion_circuit1 = device->create_image(motion_info);
+				sample_crtc_depth(cmd, *motion_circuit1, priv.dispfb1, info.depth_zbp, info.depth_psm, rect, super_samples, true);
+				device->set_name(*motion_circuit1, "MotionCircuit1");
+			}
 		}
 
 		// TODO: Need subpixel clock shenanigans here I think ...
@@ -5095,50 +5250,31 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 
 	cmd.end_render_pass();
 
-	// Depth behind circuit 1, merged exactly as its colour (same viewport), nearest-sampled.
-	Vulkan::ImageHandle merged_depth;
+	// Depth and motion behind circuit 1, merged exactly as its colour (same viewport), nearest-sampled.
+	Vulkan::ImageHandle merged_depth, merged_motion, merged_ui;
+	if (ui_circuit1 && crtc_rects[0].extent.width && crtc_rects[0].extent.height)
+	{
+		auto ui_info = image_info;
+		ui_info.format = VK_FORMAT_R8_UNORM;
+		ui_info.misc = 0;
+		merge_circuit1(cmd, merged_ui, ui_info, *ui_circuit1, crtc_rects[0], high_resolution_scanout,
+		               field_aware_rendering, info);
+	}
 	if (depth_circuit1 && crtc_rects[0].extent.width && crtc_rects[0].extent.height)
 	{
 		auto depth_info = image_info;
 		depth_info.format = VK_FORMAT_R32_SFLOAT;
 		depth_info.misc = 0;
-		merged_depth = device->create_image(depth_info);
-		device->set_name(*merged_depth, "Merged depth");
-		cmd.image_barrier(*depth_circuit1, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
-		                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-		                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-		cmd.image_barrier(*merged_depth, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
-		                  0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-		Vulkan::RenderPassInfo drp = {};
-		drp.num_color_attachments = 1;
-		drp.color_attachments[0] = &merged_depth->get_view();
-		drp.clear_attachments = 1u << 0;
-		drp.store_attachments = 1u << 0;
-		cmd.begin_render_pass(drp);
-		cmd.set_opaque_sprite_state();
-		cmd.set_program(blit_quad);
-		cmd.set_texture(0, 0, depth_circuit1->get_view(), Vulkan::StockSampler::NearestClamp);
-		VkViewport vp = {};
-		vp.x = float(crtc_rects[0].offset.x);
-		vp.y = float(crtc_rects[0].offset.y);
-		vp.width = float(crtc_rects[0].extent.width);
-		vp.height = float(crtc_rects[0].extent.height);
-		vp.maxDepth = 1.0f;
-		if (high_resolution_scanout)
-		{
-			vp.x *= 2.0f;
-			vp.y *= 2.0f;
-			vp.width *= 2.0f;
-			vp.height *= 2.0f;
-			if (field_aware_rendering && !info.phase)
-				vp.y -= 1.0f;
-		}
-		cmd.set_viewport(vp);
-		cmd.draw(3);
-		cmd.end_render_pass();
-		cmd.image_barrier(*merged_depth, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, info.dst_layout,
-		                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-		                  info.dst_stage, info.dst_access);
+		merge_circuit1(cmd, merged_depth, depth_info, *depth_circuit1, crtc_rects[0], high_resolution_scanout,
+		               field_aware_rendering, info);
+	}
+	if (motion_circuit1 && crtc_rects[0].extent.width && crtc_rects[0].extent.height)
+	{
+		auto motion_info = image_info;
+		motion_info.format = VK_FORMAT_R16G16_SFLOAT;
+		motion_info.misc = 0;
+		merge_circuit1(cmd, merged_motion, motion_info, *motion_circuit1, crtc_rects[0], high_resolution_scanout,
+		               field_aware_rendering, info);
 	}
 
 	const bool need_intermediate_pass = priv.extwrite.WRITE || is_interlaced || force_deinterlace;
@@ -5283,6 +5419,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 
 	result.image = std::move(merged);
 	result.depth = std::move(merged_depth);
+	result.motion = std::move(merged_motion);
+	result.ui = std::move(merged_ui);
 	result.interlaced = should_deinterlace;
 	result.interlace_phase = info.phase;
 	result.double_strike = double_strike;

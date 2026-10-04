@@ -864,6 +864,7 @@ void GSInterface::vertex_kick_xyz(Reg64<XYZBits> xyz)
 	pos.pos.x = int(xyz.desc.X) - render_pass.ofx;
 	pos.pos.y = int(xyz.desc.Y) - render_pass.ofy;
 	pos.z = xyz.desc.Z;
+	pos.padding = motion_index < motion_count ? int(motion_stream[motion_index++]) : 0;
 
 	attr.st.x = registers.st.desc.S;
 	attr.st.y = registers.st.desc.T;
@@ -886,6 +887,7 @@ void GSInterface::vertex_kick_xyzf(Reg64<XYZFBits> xyzf)
 	pos.pos.x = int(xyzf.desc.X) - render_pass.ofx;
 	pos.pos.y = int(xyzf.desc.Y) - render_pass.ofy;
 	pos.z = xyzf.desc.Z;
+	pos.padding = motion_index < motion_count ? int(motion_stream[motion_index++]) : 0;
 
 	attr.st.x = registers.st.desc.S;
 	attr.st.y = registers.st.desc.T;
@@ -4723,4 +4725,16 @@ void GSInterface::set_signal_interface(SignalInterface *iface)
 void ParallelGS::GSInterface::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height)
 {
 	renderer.snapshot_depth(zbp, fbw, height);
+}
+
+void ParallelGS::GSInterface::set_motion_enabled(bool enable)
+{
+	renderer.set_motion_enabled(enable);
+}
+
+void ParallelGS::GSInterface::set_vertex_motion(const uint32_t *motion, size_t count)
+{
+	motion_stream = motion;
+	motion_count = motion ? count : 0;
+	motion_index = 0;
 }

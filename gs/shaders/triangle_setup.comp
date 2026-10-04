@@ -21,6 +21,7 @@
 #define NEED_PRIMITIVE_SETUP
 #define NEED_PRIMITIVE_ATTRIBUTE
 #define NEED_TRANSFORMED_ATTRIBUTE
+#define NEED_MOTION
 #define NEED_STATE_VECTORS
 
 #include "data_buffers.h"
@@ -504,6 +505,23 @@ void main_inner(uint index)
     }
 
     transformed_attr.data[index].padding = 0; // Avoid striped cache-line writeback.
+
+    // Screen motion of the vertices (Road Trip recomp), in the attributes' order. 2D (sprites)
+    // and flat primitives move with their first vertex.
+    {
+        uint m0 = uint(vertex_position.data[3u * index + order.x].padding);
+        uint m1 = (fix || sprite) ? m0 : uint(vertex_position.data[3u * index + order.y].padding);
+        uint m2 = (fix || sprite || line) ? m0 : uint(vertex_position.data[3u * index + order.z].padding);
+        // UI or neutral primitives (reserved side values) have no motion; w: 0 scene, 1 UI, 2 neutral.
+        uint kind = 0u;
+        if (m0 == VERTEX_SIDE_UI || m1 == VERTEX_SIDE_UI || m2 == VERTEX_SIDE_UI)
+            kind = 1u;
+        else if (m0 == VERTEX_SIDE_NEUTRAL || m1 == VERTEX_SIDE_NEUTRAL || m2 == VERTEX_SIDE_NEUTRAL)
+            kind = 2u;
+        if (kind != 0u)
+            m0 = m1 = m2 = 0u;
+        transformed_motion.data[index] = uvec4(m0, m1, m2, kind);
+    }
 
     ivec3 plane_a = quantize_step(dadx, dady, constant_a);
     ivec3 plane_b = quantize_step(dbdx, dbdy, constant_b);

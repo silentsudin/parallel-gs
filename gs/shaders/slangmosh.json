@@ -65,6 +65,14 @@
 			"path": "sample_depth.frag"
 		},
 		{
+			"name": "sample_motion",
+			"path": "sample_motion.frag"
+		},
+		{
+			"name": "sample_ui",
+			"path": "sample_ui.frag"
+		},
+		{
 			"name": "weave",
 			"path": "weave.frag"
 		},

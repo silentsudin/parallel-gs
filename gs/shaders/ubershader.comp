@@ -54,6 +54,7 @@ const uint SPARSE_PATTERN_SIZE_LOG2 = NUM_SAMPLES_Y_LOG2 - NUM_SAMPLES_X_LOG2;
 #define NEED_PRIMITIVE_SETUP
 #define NEED_PRIMITIVE_ATTRIBUTE
 #define NEED_TRANSFORMED_ATTRIBUTE
+#define NEED_MOTION
 #define NEED_VRAM
 #define NEED_TEXTURE_INFO
 #define NEED_STATE_VECTORS
@@ -391,6 +392,10 @@ uint fb_color;
 uint fb_depth;
 bool fb_color_dirty;
 bool fb_depth_dirty;
+uint fb_motion; // packed half2 screen motion where Z was last written (Road Trip recomp)
+bool fb_motion_dirty;
+uint fb_ui;     // 1 where the last colour write came from the UI
+bool fb_ui_dirty;
 
 ShadeRequest pending_shade_request;
 uint pending_primitive_index;
@@ -437,6 +442,10 @@ void begin_tile()
 	uint sample_index = gl_SubgroupInvocationID & (NUM_SAMPLES - 1);
 	fb_color_dirty = false;
 	fb_depth_dirty = false;
+	fb_motion = 0u;
+	fb_motion_dirty = false;
+	fb_ui = 0u;
+	fb_ui_dirty = false;
 
 	if (is_fb_16bit)
 	{
@@ -702,6 +711,9 @@ void end_tile()
 					// Don't care about masking writes here.
 					uint vram_offset = (sample_index + 2u) * VRAM_SIZE_32;
 					vram32.data[tile.fb_index_depth + vram_offset] = fb_depth;
+					// Motion per sample: slice 1 + sample (Road Trip recomp).
+					if (constants.motion_enabled != 0 && fb_motion_dirty)
+						motion_vram.data[tile.fb_index_depth + (sample_index + 1u) * VRAM_SIZE_32] = fb_motion;
 				}
 			}
 
@@ -729,6 +741,9 @@ void end_tile()
 			unpackUnorm4x8(fb_color));
 	}
 #endif
+
+	if (fb_color_dirty && is_first_sample && fb_ui_dirty && constants.motion_enabled != 0)
+		ui_mask_vram.data[tile.fb_index] = fb_ui;
 
 	if (fb_color_dirty && is_first_sample)
 	{
@@ -774,6 +789,10 @@ void end_tile()
 					vram24.data[tile.fb_index_depth] = u8vec3(uvec3(fb_depth) >> uvec3(0, 8, 16));
 				else
 					vram32.data[tile.fb_index_depth] = fb_depth;
+
+				// Motion for sample 0 / single-sampled (Road Trip recomp).
+				if (constants.motion_enabled != 0 && fb_motion_dirty)
+					motion_vram.data[tile.fb_index_depth] = fb_motion;
 			}
 		}
 	}
@@ -909,10 +928,17 @@ ShadeResultEarly shade_early(uint primitive_index)
 	return res;
 }
 
-void write_z(uint z)
+void write_z(uint z, uint prim, float i, float j)
 {
 	fb_depth = z;
 	fb_depth_dirty = true;
+	if (constants.motion_enabled != 0)
+	{
+		uvec4 m = transformed_motion.data[prim];
+		vec2 m0 = unpackHalf2x16(m.x);
+		fb_motion = packHalf2x16(m0 + (unpackHalf2x16(m.y) - m0) * i + (unpackHalf2x16(m.z) - m0) * j);
+		fb_motion_dirty = true;
+	}
 }
 
 vec4 modulate(vec4 a, vec4 b, bool tcc)
@@ -1595,6 +1621,17 @@ void shade_resolve(uint primitive_index, uint state_index, uint tex)
 			else
 				fb_color = packed_color;
 
+			// UI mask (Road Trip recomp): neutral primitives (full-screen passes) leave it alone.
+			if (constants.motion_enabled != 0)
+			{
+				uint kind = transformed_motion.data[primitive_index].w;
+				if (kind != 2u)
+				{
+					fb_ui = kind;
+					fb_ui_dirty = true;
+				}
+			}
+
 			// Quantize the 32-bit -> 16-bit -> 32-bit roundtrip through memory.
 			if (is_fb_16bit)
 				fb_color &= 0x80f8f8f8u;
@@ -1602,7 +1639,7 @@ void shade_resolve(uint primitive_index, uint state_index, uint tex)
 		}
 
 		if (Z_SENSITIVE && write_zb && pending_shade_request.z_write)
-			write_z(pending_shade_request.z);
+			write_z(pending_shade_request.z, pending_primitive_index, pending_shade_request.i, pending_shade_request.j);
 	}
 }
 
@@ -1747,7 +1784,7 @@ void main()
 								// future depth tests will not be correct.
 								// We can defer color shading (which is the hard part) however.
 								pixel.request.z_write = false;
-								write_z(pixel.request.z);
+								write_z(pixel.request.z, shade_primitive_index, pixel.request.i, pixel.request.j);
 							}
 						}
 						else
@@ -1762,7 +1799,7 @@ void main()
 						// This pixel is also opaque, so any previous color shading is also irrelevant.
 						pixel.request.z_write = false;
 						pending_shade_request.z_write = false;
-						write_z(pixel.request.z);
+						write_z(pixel.request.z, shade_primitive_index, pixel.request.i, pixel.request.j);
 						#if defined(FEEDBACK_COLOR) && FEEDBACK_COLOR
 						last_z_passed = true;
 						#endif
