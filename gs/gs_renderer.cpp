@@ -562,8 +562,9 @@ void GSRenderer::kick_compilation_tasks()
 
 			for (auto &format : formats)
 			{
-				for (auto &flags : variant_flags)
+				for (auto flags : variant_flags)
 				{
+					flags |= hw_trilinear_flag;
 					for (auto &rates : sampling_rates)
 						if (rate_wanted(rates.sample_x, rates.sample_y))
 					{
@@ -872,6 +873,15 @@ bool GSRenderer::init(Vulkan::Device *device_, const GSOptions &options)
 	init_luts();
 
 	precompile_super_sampling = uint32_t(options.super_sampling);
+	// Road Trip recomp: Adreno runs the ubershader at low occupancy, where a second dependent texture
+	// fetch per pixel costs more than half of shading; trilinear is one hardware fetch there
+	// (RT_PGS_HW_TRILINEAR=0|1 overrides).
+	{
+		bool hw = device->get_gpu_properties().vendorID == 0x5143;
+		if (const char *e = getenv("RT_PGS_HW_TRILINEAR"))
+			hw = *e == '1';
+		hw_trilinear_flag = hw ? VARIANT_FLAG_HW_TRILINEAR_BIT : 0;
+	}
 	kick_compilation_tasks();
 
 	// Reserve 1/3 of our budget to slab-allocate image handles.
@@ -1740,6 +1750,7 @@ void GSRenderer::bind_textures(Vulkan::CommandBuffer &cmd, const RenderPass &rp)
 		memcpy(recolors, rp.recolors, rp.num_recolors * sizeof(vec4));
 
 	bound_texture_has_array = false;
+	bound_texture_has_replaced = false;
 
 	if (!bindless_allocator)
 		bindless_allocator = get_bindless_pool();
@@ -1776,6 +1787,8 @@ void GSRenderer::bind_textures(Vulkan::CommandBuffer &cmd, const RenderPass &rp)
 		tex_infos[i] = rp.textures[i].info;
 		if (rp.textures[i].info.arrayed)
 			bound_texture_has_array = true;
+		if (rp.textures[i].info.flags & TEX_INFO_REPLACED)
+			bound_texture_has_replaced = true;
 	}
 	bindless_allocator->update();
 	cmd.set_bindless(DESCRIPTOR_SET_IMAGES, bindless_allocator->get_descriptor_set());
@@ -1795,6 +1808,20 @@ void GSRenderer::bind_frame_resources(const RenderPass &rp)
 	cmd.set_storage_buffer(0, BINDING_CLUT, *buffers.clut);
 	cmd.set_sampler(0, BINDING_SAMPLER_NEAREST, Vulkan::StockSampler::NearestWrap);
 	cmd.set_sampler(0, BINDING_SAMPLER_LINEAR, Vulkan::StockSampler::LinearWrap);
+	if (!nearest_trilinear_sampler)
+	{
+		Vulkan::SamplerCreateInfo info = {};
+		info.mag_filter = VK_FILTER_NEAREST;
+		info.min_filter = VK_FILTER_NEAREST;
+		info.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		info.address_mode_u = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		info.address_mode_v = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		info.address_mode_w = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		info.max_lod = VK_LOD_CLAMP_NONE;
+		nearest_trilinear_sampler = device->create_sampler(info);
+	}
+	cmd.set_sampler(DESCRIPTOR_SET_WORKGROUP_LIST, BINDING_SAMPLER_TRILINEAR, Vulkan::StockSampler::TrilinearWrap);
+	cmd.set_sampler(DESCRIPTOR_SET_WORKGROUP_LIST, BINDING_SAMPLER_NEAREST_TRILINEAR, *nearest_trilinear_sampler);
 	if (!aniso_samplers[0] || aniso_sampler_level != anisotropy)
 	{
 		// Repeat, clamp S, clamp T, clamp both.
@@ -1956,6 +1983,11 @@ uint32_t GSRenderer::get_target_hierarchical_binning(
 	// Broken Metal drivers can't deal with the hierarchical binning for some reason.
 	return 1;
 #endif
+	// Road Trip recomp: nor can Adreno (whole blocks of tiles lose their primitives).
+	// RT_PGS_HIER_BINNING=0|1 overrides.
+	static const int hier_env = [] { const char *e = getenv("RT_PGS_HIER_BINNING"); return e ? int(*e == '1') : -1; }();
+	if (hier_env == 0 || (hier_env < 0 && device->get_gpu_properties().vendorID == 0x5143))
+		return 1;
 
 	// Only bother for large number of primitives.
 	// Simpler full-screen blit passes and similar should just use the simplified flat binner.
@@ -2781,6 +2813,9 @@ void GSRenderer::dispatch_shading(Vulkan::CommandBuffer &cmd, const RenderPass &
 
 	if (bound_texture_has_array)
 		variant_flags |= VARIANT_FLAG_HAS_TEXTURE_ARRAY_BIT;
+	if (bound_texture_has_replaced)
+		variant_flags |= VARIANT_FLAG_HAS_REPLACED_TEXTURE_BIT;
+	variant_flags |= hw_trilinear_flag;
 
 	cmd.set_specialization_constant(5, variant_flags);
 

@@ -140,6 +140,8 @@ layout(set = 0, binding = BINDING_SAMPLER_ANISO) uniform sampler aniso_sampler;
 layout(set = 0, binding = BINDING_SAMPLER_ANISO_CLAMP_S) uniform sampler aniso_sampler_clamp_s;
 layout(set = 0, binding = BINDING_SAMPLER_ANISO_CLAMP_T) uniform sampler aniso_sampler_clamp_t;
 layout(set = 0, binding = BINDING_SAMPLER_ANISO_CLAMP_ST) uniform sampler aniso_sampler_clamp_st;
+layout(set = DESCRIPTOR_SET_WORKGROUP_LIST, binding = BINDING_SAMPLER_TRILINEAR) uniform sampler trilinear_sampler;
+layout(set = DESCRIPTOR_SET_WORKGROUP_LIST, binding = BINDING_SAMPLER_NEAREST_TRILINEAR) uniform sampler nearest_trilinear_sampler;
 layout(set = DESCRIPTOR_SET_IMAGES, binding = 0) uniform texture2D bindless_textures[];
 layout(set = DESCRIPTOR_SET_IMAGES, binding = 0) uniform texture2DArray bindless_textures_array[];
 #endif

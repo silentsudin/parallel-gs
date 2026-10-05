@@ -490,6 +490,9 @@ private:
 	void bind_textures(Vulkan::CommandBuffer &cmd, const RenderPass &rp);
 
 	bool bound_texture_has_array = false;
+	bool bound_texture_has_replaced = false; // Road Trip recomp
+	uint32_t hw_trilinear_flag = 0; // Road Trip recomp: VARIANT_FLAG_HW_TRILINEAR_BIT on Adreno
+	Vulkan::SamplerHandle nearest_trilinear_sampler;
 
 	void bind_frame_resources(const RenderPass &rp);
 	void bind_frame_resources_instanced(const RenderPass &rp, uint32_t instance, uint32_t num_primitives);

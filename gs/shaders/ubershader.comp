@@ -74,6 +74,8 @@ const bool HAS_PRIMITIVE_RANGE = (VARIANT_FLAGS & VARIANT_FLAG_HAS_PRIMITIVE_RAN
 const bool HAS_SUPER_SAMPLE_REFERENCE = (VARIANT_FLAGS & VARIANT_FLAG_HAS_SUPER_SAMPLE_REFERENCE_BIT) != 0;
 const bool FEEDBACK_READS_DEPTH = (VARIANT_FLAGS & VARIANT_FLAG_FEEDBACK_DEPTH_BIT) != 0;
 const bool HAS_TEXTURE_ARRAY = (VARIANT_FLAGS & VARIANT_FLAG_HAS_TEXTURE_ARRAY_BIT) != 0;
+const bool HAS_REPLACED_TEXTURE = (VARIANT_FLAGS & VARIANT_FLAG_HAS_REPLACED_TEXTURE_BIT) != 0;
+const bool HW_TRILINEAR = (VARIANT_FLAGS & VARIANT_FLAG_HW_TRILINEAR_BIT) != 0;
 
 layout(std430, set = 0, binding = BINDING_CLUT) readonly buffer CLUT16
 {
@@ -1114,7 +1116,7 @@ vec4 sample_texture(uint tex_word, uint filtering, vec2 uv, float q, bool perspe
 	// A replacement image (texture packs) has its own mip chain: sampled with the primitive's
 	// texture-coordinate gradients through a trilinear, anisotropic sampler, in the original
 	// texture's texel space (no 1/16-texel snap, which would quantise it to coarse steps).
-	if ((tex_info.flags & TEX_INFO_REPLACED) != 0)
+	if (HAS_REPLACED_TEXTURE && (tex_info.flags & TEX_INFO_REPLACED) != 0)
 	{
 		vec2 base = perspective ? size.xy : vec2(1.0);
 		vec2 t = uv * base;
@@ -1307,7 +1309,19 @@ vec4 sample_texture(uint tex_word, uint filtering, vec2 uv, float q, bool perspe
 
 		// The sampler may be divergent if we have MMIN != MMAG. Most likely it will not.
 		// With newer Vulkan spec clarification, we don't need nonuniformEXT here as long as it's subgroup uniform :)
-		if (sampler_index != 0)
+		if (HW_TRILINEAR && fract_LOD != 0.0)
+		{
+			// Both levels in one fetch, blended at the GS's 1/16 LOD steps. Differs from two
+			// fetches by at most one step of rounding, and the second level's coordinate is
+			// snapped at the first level's precision.
+			float lod = LOD_1 + floor(fract_LOD * 16.0) * 0.0625;
+			if (sampler_index != 0)
+				color_1 = textureLod(sampler2D(bindless_textures[tex_index], trilinear_sampler), uv_1, lod);
+			else
+				color_1 = textureLod(sampler2D(bindless_textures[tex_index], nearest_trilinear_sampler), uv_1, lod);
+			fract_LOD = 0.0;
+		}
+		else if (sampler_index != 0)
 			color_1 = textureLod(sampler2D(bindless_textures[tex_index], linear_sampler), uv_1, LOD_1);
 		else
 			color_1 = textureLod(sampler2D(bindless_textures[tex_index], nearest_sampler), uv_1, LOD_1);

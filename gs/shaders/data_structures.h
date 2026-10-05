@@ -396,6 +396,9 @@ CONSTEXPR int AFAIL_RGB_ONLY = 3;
 #define BINDING_SAMPLER_ANISO_CLAMP_T 28
 #define BINDING_SAMPLER_ANISO_CLAMP_ST 29
 #define BINDING_TEXTURE_RECOLOR 30
+// Road Trip recomp: mip-linear samplers for one-fetch trilinear, in the workgroup-list set (set 0 is full).
+#define BINDING_SAMPLER_TRILINEAR 1
+#define BINDING_SAMPLER_NEAREST_TRILINEAR 2
 #define BINDING_TEXTURE_INFO 15
 
 #define BINDING_FEEDBACK_COLOR 16
@@ -427,6 +430,11 @@ CONSTEXPR int VARIANT_FLAG_HAS_PRIMITIVE_RANGE_BIT = 1 << 3;
 CONSTEXPR int VARIANT_FLAG_HAS_SUPER_SAMPLE_REFERENCE_BIT = 1 << 4;
 CONSTEXPR int VARIANT_FLAG_FEEDBACK_DEPTH_BIT = 1 << 5;
 CONSTEXPR int VARIANT_FLAG_HAS_TEXTURE_ARRAY_BIT = 1 << 6;
+// Road Trip recomp: a texture-pack replacement is bound (the replacement path is compiled in only
+// then: on Adreno its registers alone cost ~15% of shading), and bilinear trilinear filtering in
+// one hardware fetch (Adreno, where each dependent fetch is exposed at its low occupancy).
+CONSTEXPR int VARIANT_FLAG_HAS_REPLACED_TEXTURE_BIT = 1 << 7;
+CONSTEXPR int VARIANT_FLAG_HW_TRILINEAR_BIT = 1 << 8;
 
 #ifdef __cplusplus
 }
