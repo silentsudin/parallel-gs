@@ -478,6 +478,13 @@ void GSRenderer::kick_compilation_tasks()
 	std::vector<Vulkan::DeferredPipelineCompile> tasks;
 	compilation_tasks_active = true;
 
+	// Road Trip recomp: Adreno compiles each variant slowly (minutes for all of them), so only the
+	// configured super-sampling rate (and 1x) is primed there; others compile when first used.
+	const bool adreno = device->get_gpu_properties().vendorID == 0x5143;
+	auto rate_wanted = [&](uint32_t x, uint32_t y) {
+		return !adreno || (x == 0 && y == 0) || (1u << (x + y)) == precompile_super_sampling;
+	};
+
 	{
 		auto cmd = device->request_command_buffer();
 		cmd->set_program(shaders.ubershader[0][0]);
@@ -558,6 +565,7 @@ void GSRenderer::kick_compilation_tasks()
 				for (auto &flags : variant_flags)
 				{
 					for (auto &rates : sampling_rates)
+						if (rate_wanted(rates.sample_x, rates.sample_y))
 					{
 						for (auto &feedback : feedbacks)
 						{
@@ -737,6 +745,10 @@ void GSRenderer::kick_compilation_tasks()
 
 	size_t num_tasks = tasks.size();
 	size_t target_threads = (std::thread::hardware_concurrency() + 1) / 2;
+	// Road Trip recomp: Adreno's shader compiler crashes (SIGSEGV in libllvm-qgl) when several
+	// compute pipelines are compiled at once; one background thread there.
+	if (device->get_gpu_properties().vendorID == 0x5143)
+		target_threads = 1;
 	size_t tasks_per_thread = num_tasks / target_threads;
 
 	for (size_t thread_index = 0; thread_index < target_threads; thread_index++)
@@ -750,6 +762,7 @@ void GSRenderer::kick_compilation_tasks()
 		{
 			// Just shuts up warnings.
 			Util::register_thread_index(0);
+			Util::set_current_thread_name("PGS-Precompile");
 			for (auto &task: moved_tasks)
 			{
 				// If we destroy the device before threads are done spinning.
@@ -858,6 +871,7 @@ bool GSRenderer::init(Vulkan::Device *device_, const GSOptions &options)
 	descriptor_timeline = device->request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
 	init_luts();
 
+	precompile_super_sampling = uint32_t(options.super_sampling);
 	kick_compilation_tasks();
 
 	// Reserve 1/3 of our budget to slab-allocate image handles.

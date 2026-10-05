@@ -53,7 +53,18 @@ else()
     set(GRANITE_PLATFORM "SDL" CACHE STRING "" FORCE)
 endif()
 
-add_subdirectory(Granite EXCLUDE_FROM_ALL)
+if (PARALLEL_GS_STANDALONE AND ANDROID)
+    # Granite's Android application platform needs GameActivity and friends; the standalone
+    # library has no application platform (the host app owns the window), so configure Granite as
+    # a plain library. Its sources still compile for Android.
+    set(PGS_SAVED_ANDROID ${ANDROID})
+    set(ANDROID OFF)
+    set(GRANITE_POSITION_INDEPENDENT ON CACHE BOOL "" FORCE) # it ends up in a shared library
+    add_subdirectory(Granite EXCLUDE_FROM_ALL)
+    set(ANDROID ${PGS_SAVED_ANDROID})
+else()
+    add_subdirectory(Granite EXCLUDE_FROM_ALL)
+endif()
 
 add_subdirectory(gs)
 add_subdirectory(analog)
