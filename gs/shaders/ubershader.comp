@@ -57,6 +57,7 @@ const uint SPARSE_PATTERN_SIZE_LOG2 = NUM_SAMPLES_Y_LOG2 - NUM_SAMPLES_X_LOG2;
 #define NEED_MOTION
 #define NEED_VRAM
 #define NEED_TEXTURE_INFO
+#define NEED_TEXTURE_RECOLOR
 #define NEED_STATE_VECTORS
 
 #include "data_structures.h"
@@ -1136,7 +1137,15 @@ vec4 sample_texture(uint tex_word, uint filtering, vec2 uv, float q, bool perspe
 			c = textureGrad(sampler2D(bindless_textures[tex_index], aniso_sampler_clamp_t), n, gx, gy);
 		else
 			c = textureGrad(sampler2D(bindless_textures[tex_index], aniso_sampler), n, gx, gy);
-		return roundEven(255.0 * c);
+		c *= 255.0;
+		if ((tex_info.flags & TEX_INFO_RECOLOR) != 0)
+		{
+			int base = (tex_info.flags >> TEX_INFO_RECOLOR_SLOT_SHIFT) * 5;
+			c = clamp(vec4(dot(texture_recolor.data[base], c), dot(texture_recolor.data[base + 1], c),
+			               dot(texture_recolor.data[base + 2], c), dot(texture_recolor.data[base + 3], c)) +
+			          texture_recolor.data[base + 4], vec4(0.0), vec4(255.0));
+		}
+		return roundEven(c);
 	}
 
 	// LOD calculation

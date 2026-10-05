@@ -102,6 +102,14 @@ uniform TextureInfo
 } texture_info;
 #endif
 
+#ifdef NEED_TEXTURE_RECOLOR
+layout(set = 0, binding = BINDING_TEXTURE_RECOLOR, std140)
+uniform TextureRecolor
+{
+	vec4 data[PGS_MAX_RECOLORS * 5];
+} texture_recolor;
+#endif
+
 #ifdef NEED_TRANSFORMED_ATTRIBUTE
 layout(set = 0, binding = BINDING_TRANSFORMED_ATTRIBUTES, std430)
 PRIMITIVE_SETUP_QUALIFIER buffer TransformedAttribute

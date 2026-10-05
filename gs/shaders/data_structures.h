@@ -108,6 +108,11 @@ CONSTEXPR int TEX_INFO_FORCE_SAMPLE_MAPPING = 0x1;
 CONSTEXPR int TEX_INFO_LONG_TERM_REFERENCE = 0x2;
 // Road Trip recomp (texture packs): sampled from a larger replacement image; no 1/16-texel snap.
 CONSTEXPR int TEX_INFO_REPLACED = 0x4;
+// A replacement drawn for another palette of its texture, recoloured: flags >> 8 is the slot in
+// texture_recolor (rows r, g, b, a, then the offset; out.c = dot(row_c, texel) + offset.c, 0..255).
+CONSTEXPR int TEX_INFO_RECOLOR = 0x8;
+CONSTEXPR int TEX_INFO_RECOLOR_SLOT_SHIFT = 8;
+CONSTEXPR int PGS_MAX_RECOLORS = 256;
 
 CONSTEXPR int PGS_FB_SWIZZLE_WIDTH_LOG2 = 3;
 CONSTEXPR int PGS_FB_SWIZZLE_HEIGHT_LOG2 = 3;
@@ -390,6 +395,7 @@ CONSTEXPR int AFAIL_RGB_ONLY = 3;
 #define BINDING_SAMPLER_ANISO_CLAMP_S 27
 #define BINDING_SAMPLER_ANISO_CLAMP_T 28
 #define BINDING_SAMPLER_ANISO_CLAMP_ST 29
+#define BINDING_TEXTURE_RECOLOR 30
 #define BINDING_TEXTURE_INFO 15
 
 #define BINDING_FEEDBACK_COLOR 16

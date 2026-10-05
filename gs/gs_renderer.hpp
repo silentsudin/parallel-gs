@@ -227,6 +227,8 @@ struct RenderPass
 
 	const TextureInfo *textures;
 	uint32_t num_textures;
+	const vec4 *recolors = nullptr; // texture-pack recolour transforms (5 vec4 per slot)
+	uint32_t num_recolors = 0;
 
 	uint32_t label_key;
 	uint32_t debug_capture_stride;

@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <type_traits>
 
 namespace ParallelGS
@@ -294,10 +295,19 @@ public:
 	bool replace_cached_texture(uint64_t hash, Vulkan::ImageHandle image);
 	// Drops every replacement and prediction: textures decode from GS memory again.
 	void drop_texture_replacements();
+	// Replacement images bound since the last call (pack memory budget: least recently used).
+	void collect_used_replacements(std::vector<const Vulkan::Image *> &out)
+	{
+		out.assign(replacements_used.begin(), replacements_used.end());
+		replacements_used.clear();
+	}
+	// Every cached texture decodes again (predictions rebind replacements at once).
+	void invalidate_texture_cache() { flush(); tracker.invalidate_all_cached_textures(); }
 	// Bind `image` for every texture decoded from now on with this stable key (null: stop). Set
 	// once a readback showed the key's content has a replacement; textures whose palette is
 	// reloaded every frame are decoded under a new cache key every frame.
-	void set_texture_prediction(uint64_t stable_key, Vulkan::ImageHandle image);
+	// recolor: 20 floats (rows r, g, b, a, then offset; see TexInfo) or null.
+	void set_texture_prediction(uint64_t stable_key, Vulkan::ImageHandle image, const float *recolor = nullptr);
 	void set_debug_mode(const DebugMode &mode);
 	void set_hacks(const Hacks &hacks);
 
@@ -372,8 +382,15 @@ private:
 	struct UploadExtent { uint32_t psm, width, height; };
 	std::unordered_map<uint32_t, UploadExtent> uploads;
 	bool texture_readback = false;
+	std::unordered_set<const Vulkan::Image *> replacements_used;
 	GSRenderer renderer;
-	std::unordered_map<uint64_t, Vulkan::ImageHandle> texture_predictions;
+	struct TexturePrediction
+	{
+		Vulkan::ImageHandle image;
+		bool recolor = false;
+		float transform[20] = {};
+	};
+	std::unordered_map<uint64_t, TexturePrediction> texture_predictions;
 	uint32_t vram_size = 0;
 	DebugMode debug_mode;
 	Hacks hacks;
@@ -413,6 +430,7 @@ private:
 		std::vector<StateVector> state_vectors;
 		std::vector<Vulkan::ImageHandle> held_images;
 		std::vector<TextureInfo> tex_infos;
+		std::vector<vec4> recolors; // texture-pack recolour transforms, 5 per slot (TEX_INFO_RECOLOR)
 		std::vector<TEX0Bits> tex0_infos;
 
 		bool tex_infos_has_super_samples = false;

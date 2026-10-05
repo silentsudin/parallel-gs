@@ -1720,6 +1720,11 @@ void GSRenderer::bind_textures(Vulkan::CommandBuffer &cmd, const RenderPass &rp)
 	auto *tex_infos = cmd.allocate_typed_constant_data<TexInfo>(
 			0, BINDING_TEXTURE_INFO, std::max<uint32_t>(1, rp.num_textures));
 
+	// Road Trip recomp: texture-pack recolour transforms (TEX_INFO_RECOLOR).
+	auto *recolors = cmd.allocate_typed_constant_data<vec4>(0, BINDING_TEXTURE_RECOLOR, std::max<uint32_t>(5, rp.num_recolors));
+	if (rp.num_recolors)
+		memcpy(recolors, rp.recolors, rp.num_recolors * sizeof(vec4));
+
 	bound_texture_has_array = false;
 
 	if (!bindless_allocator)

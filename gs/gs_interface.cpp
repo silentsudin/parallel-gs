@@ -154,6 +154,8 @@ void GSInterface::flush_render_pass(FlushReason reason)
 
 		rp.textures = render_pass.tex_infos.data();
 		rp.num_textures = render_pass.tex_infos.size();
+		rp.recolors = render_pass.recolors.data();
+		rp.num_recolors = uint32_t(render_pass.recolors.size());
 
 		uint32_t binning_cost = 0;
 
@@ -325,6 +327,7 @@ void GSInterface::flush_render_pass(FlushReason reason)
 	render_pass.held_images.clear();
 	render_pass.texture_map.clear();
 	render_pass.tex_infos.clear();
+	render_pass.recolors.clear();
 	render_pass.tex_infos_has_super_samples = false;
 	render_pass.tex0_infos.clear();
 	render_pass.state_vector_map.clear();
@@ -1839,11 +1842,11 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 		if (!texture_predictions.empty())
 		{
 			auto it = texture_predictions.find(decode_desc.stable_key());
-			if (it != texture_predictions.end() && image.get() != it->second.get())
+			if (it != texture_predictions.end() && image.get() != it->second.image.get())
 			{
 				if (long_term_cache_texture && desc.samples == 1)
-					tracker.replace_cached_texture(image_hash, it->second);
-				image = it->second;
+					tracker.replace_cached_texture(image_hash, it->second.image);
+				image = it->second.image;
 			}
 		}
 
@@ -1884,7 +1887,20 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 		info.info.arrayed = int(desc.samples > 1);
 		info.info.flags = long_term_cache_texture ? TEX_INFO_LONG_TERM_REFERENCE : 0;
 		if (!(image->get_create_info().usage & VK_IMAGE_USAGE_STORAGE_BIT))
+		{
 			info.info.flags |= TEX_INFO_REPLACED;
+			replacements_used.insert(image.get());
+			// Another palette of the replaced texture: recoloured in the shader.
+			auto p = texture_predictions.find(decode_desc.stable_key());
+			if (p != texture_predictions.end() && p->second.recolor && p->second.image.get() == image.get() &&
+			    render_pass.recolors.size() < PGS_MAX_RECOLORS * 5)
+			{
+				const float *t = p->second.transform;
+				info.info.flags |= TEX_INFO_RECOLOR | int((render_pass.recolors.size() / 5) << TEX_INFO_RECOLOR_SLOT_SHIFT);
+				for (int row = 0; row < 5; row++)
+					render_pass.recolors.push_back(vec4(t[row * 4], t[row * 4 + 1], t[row * 4 + 2], t[row * 4 + 3]));
+			}
+		}
 		if (info.info.arrayed)
 			render_pass.tex_infos_has_super_samples = true;
 
@@ -4818,10 +4834,16 @@ void GSInterface::collect_texture_readbacks(std::vector<GSRenderer::TextureReadb
 	renderer.collect_texture_readbacks(out);
 }
 
-void GSInterface::set_texture_prediction(uint64_t stable_key, Vulkan::ImageHandle image)
+void GSInterface::set_texture_prediction(uint64_t stable_key, Vulkan::ImageHandle image, const float *recolor)
 {
 	if (image)
-		texture_predictions[stable_key] = std::move(image);
+	{
+		auto &p = texture_predictions[stable_key];
+		p.image = std::move(image);
+		p.recolor = recolor != nullptr;
+		if (recolor)
+			std::memcpy(p.transform, recolor, sizeof(p.transform));
+	}
 	else
 		texture_predictions.erase(stable_key);
 }
@@ -4830,6 +4852,7 @@ void GSInterface::drop_texture_replacements()
 {
 	flush();
 	texture_predictions.clear();
+	replacements_used.clear();
 	tracker.invalidate_all_cached_textures();
 }
 
