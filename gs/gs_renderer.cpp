@@ -1776,22 +1776,29 @@ void GSRenderer::bind_frame_resources(const RenderPass &rp)
 	cmd.set_storage_buffer(0, BINDING_CLUT, *buffers.clut);
 	cmd.set_sampler(0, BINDING_SAMPLER_NEAREST, Vulkan::StockSampler::NearestWrap);
 	cmd.set_sampler(0, BINDING_SAMPLER_LINEAR, Vulkan::StockSampler::LinearWrap);
-	if (!aniso_sampler || aniso_sampler_level != anisotropy)
+	if (!aniso_samplers[0] || aniso_sampler_level != anisotropy)
 	{
-		Vulkan::SamplerCreateInfo info = {};
-		info.mag_filter = VK_FILTER_LINEAR;
-		info.min_filter = VK_FILTER_LINEAR;
-		info.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-		info.address_mode_u = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		info.address_mode_v = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		info.address_mode_w = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		info.max_lod = VK_LOD_CLAMP_NONE;
-		info.anisotropy_enable = anisotropy > 1 && device->get_device_features().enabled_features.samplerAnisotropy;
-		info.max_anisotropy = float(anisotropy);
-		aniso_sampler = device->create_sampler(info);
+		// Repeat, clamp S, clamp T, clamp both.
+		for (unsigned i = 0; i < 4; i++)
+		{
+			Vulkan::SamplerCreateInfo info = {};
+			info.mag_filter = VK_FILTER_LINEAR;
+			info.min_filter = VK_FILTER_LINEAR;
+			info.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+			info.address_mode_u = (i & 1) ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			info.address_mode_v = (i & 2) ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			info.address_mode_w = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			info.max_lod = VK_LOD_CLAMP_NONE;
+			info.anisotropy_enable = anisotropy > 1 && device->get_device_features().enabled_features.samplerAnisotropy;
+			info.max_anisotropy = float(anisotropy);
+			aniso_samplers[i] = device->create_sampler(info);
+		}
 		aniso_sampler_level = anisotropy;
 	}
-	cmd.set_sampler(0, BINDING_SAMPLER_ANISO, *aniso_sampler);
+	cmd.set_sampler(0, BINDING_SAMPLER_ANISO, *aniso_samplers[0]);
+	cmd.set_sampler(0, BINDING_SAMPLER_ANISO_CLAMP_S, *aniso_samplers[1]);
+	cmd.set_sampler(0, BINDING_SAMPLER_ANISO_CLAMP_T, *aniso_samplers[2]);
+	cmd.set_sampler(0, BINDING_SAMPLER_ANISO_CLAMP_ST, *aniso_samplers[3]);
 
 	cmd.set_storage_buffer(0, BINDING_VRAM, *buffers.gpu);
 	if (!buffers.motion_dummy)

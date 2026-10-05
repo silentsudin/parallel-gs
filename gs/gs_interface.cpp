@@ -4749,6 +4749,13 @@ void GSInterface::set_texture_prediction(uint64_t stable_key, Vulkan::ImageHandl
 		texture_predictions.erase(stable_key);
 }
 
+void GSInterface::drop_texture_replacements()
+{
+	flush();
+	texture_predictions.clear();
+	tracker.invalidate_all_cached_textures();
+}
+
 bool GSInterface::replace_cached_texture(uint64_t hash, Vulkan::ImageHandle image)
 {
 	return tracker.replace_cached_texture(Util::Hash(hash), std::move(image));

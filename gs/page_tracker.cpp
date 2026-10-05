@@ -840,6 +840,17 @@ bool PageTracker::replace_cached_texture(Util::Hash hash, Vulkan::ImageHandle im
 	return true;
 }
 
+void PageTracker::invalidate_all_cached_textures()
+{
+	for (auto &page : page_state)
+	{
+		if (!page.cached_textures.empty())
+			invalidate_cached_textures(page.cached_textures, UINT32_MAX, UINT32_MAX, UINT32_MAX);
+		if (!page.short_term_cached_textures.empty())
+			invalidate_cached_textures(page.short_term_cached_textures, UINT32_MAX, UINT32_MAX, UINT32_MAX);
+	}
+}
+
 void PageTracker::garbage_collect_texture_masked_handles(std::vector<CachedTextureMasked> &textures)
 {
 	auto itr = Util::unstable_remove_if(textures.begin(), textures.end(), [](const CachedTextureMasked &masked) {

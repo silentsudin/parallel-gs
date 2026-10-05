@@ -386,6 +386,10 @@ CONSTEXPR int AFAIL_RGB_ONLY = 3;
 #define BINDING_CLUT 14
 // Road Trip recomp: anisotropic, trilinear sampler for replacement textures (texture packs).
 #define BINDING_SAMPLER_ANISO 26
+// ... and with clamp-to-edge on S, T, and both (27..29), for clamped textures.
+#define BINDING_SAMPLER_ANISO_CLAMP_S 27
+#define BINDING_SAMPLER_ANISO_CLAMP_T 28
+#define BINDING_SAMPLER_ANISO_CLAMP_ST 29
 #define BINDING_TEXTURE_INFO 15
 
 #define BINDING_FEEDBACK_COLOR 16

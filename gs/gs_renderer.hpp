@@ -601,7 +601,7 @@ public:
 	void set_anisotropy(uint32_t level) { anisotropy = std::max(level, 1u); }
 private:
 	uint32_t anisotropy = 1, aniso_sampler_level = 0;
-	Vulkan::SamplerHandle aniso_sampler;
+	Vulkan::SamplerHandle aniso_samplers[4];
 
 	// Road Trip recomp (texture dumps and packs): each newly decoded texture copied back to the
 	// host. A batch completes with the vsync after it was recorded.

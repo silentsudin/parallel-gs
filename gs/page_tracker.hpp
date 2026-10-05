@@ -185,6 +185,8 @@ public:
 	Vulkan::ImageHandle find_cached_texture(Util::Hash hash) const;
 	// Road Trip recomp (texture packs): the image a cached texture is sampled from, replaced.
 	bool replace_cached_texture(Util::Hash hash, Vulkan::ImageHandle image);
+	// Every cached texture decodes again on next use (texture packs switched).
+	void invalidate_all_cached_textures();
 
 	// If there are hazards, this returns UINT64_MAX. Must explicitly call mark_submission_timeline first.
 	uint64_t get_host_read_timeline(const PageRect &rect) const;

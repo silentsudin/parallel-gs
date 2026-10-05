@@ -292,6 +292,8 @@ public:
 	void set_anisotropy(uint32_t level) { renderer.set_anisotropy(level); }
 	void collect_texture_readbacks(std::vector<GSRenderer::TextureReadback> &out);
 	bool replace_cached_texture(uint64_t hash, Vulkan::ImageHandle image);
+	// Drops every replacement and prediction: textures decode from GS memory again.
+	void drop_texture_replacements();
 	// Bind `image` for every texture decoded from now on with this stable key (null: stop). Set
 	// once a readback showed the key's content has a replacement; textures whose palette is
 	// reloaded every frame are decoded under a new cache key every frame.

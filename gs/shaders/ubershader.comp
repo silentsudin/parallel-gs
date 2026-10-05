@@ -1126,7 +1126,17 @@ vec4 sample_texture(uint tex_word, uint filtering, vec2 uv, float q, bool perspe
 		texture_gradients(primitive_index, stq, stqf1, stqf2, perspective, duv_dx, duv_dy);
 		vec2 gx = duv_dx * base * size.zw;
 		vec2 gy = duv_dy * base * size.zw;
-		return roundEven(255.0 * textureGrad(sampler2D(bindless_textures[tex_index], aniso_sampler), n, gx, gy));
+		// Clamped axes clamp to the edge at every mip level (repeat would blend in the far edge).
+		vec4 c;
+		if (sampler_clamp_s && sampler_clamp_t)
+			c = textureGrad(sampler2D(bindless_textures[tex_index], aniso_sampler_clamp_st), n, gx, gy);
+		else if (sampler_clamp_s)
+			c = textureGrad(sampler2D(bindless_textures[tex_index], aniso_sampler_clamp_s), n, gx, gy);
+		else if (sampler_clamp_t)
+			c = textureGrad(sampler2D(bindless_textures[tex_index], aniso_sampler_clamp_t), n, gx, gy);
+		else
+			c = textureGrad(sampler2D(bindless_textures[tex_index], aniso_sampler), n, gx, gy);
+		return roundEven(255.0 * c);
 	}
 
 	// LOD calculation
