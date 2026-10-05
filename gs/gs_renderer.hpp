@@ -124,6 +124,25 @@ struct TextureDescriptor
 	{
 		return !(*this == other);
 	}
+
+	// Road Trip recomp (texture packs): the cache key without the palette instance, which a
+	// game reloading its CLUT every frame changes every frame.
+	inline uint64_t stable_key() const
+	{
+		Util::Hasher h;
+		h.u64(tex0.bits);
+		h.u64(tex1.bits);
+		h.u64(texa.bits);
+		h.u64(miptbp1_3.bits);
+		h.u64(miptbp4_6.bits);
+		h.u64(clamp.bits);
+		h.u32(samples);
+		h.u32(rect.x);
+		h.u32(rect.y);
+		h.u32(rect.width);
+		h.u32(rect.height);
+		return h.get();
+	}
 };
 
 struct PaletteUploadDescriptor
@@ -577,6 +596,38 @@ private:
 	uint32_t scan_rate_x_log2 = 0, scan_rate_y_log2 = 0;
 	void set_scanout_specialization(Vulkan::CommandBuffer &cmd) const;
 	bool fixed_wave32() const;
+public:
+	// Road Trip recomp: anisotropy of replacement-texture sampling (1 = trilinear only).
+	void set_anisotropy(uint32_t level) { anisotropy = std::max(level, 1u); }
+private:
+	uint32_t anisotropy = 1, aniso_sampler_level = 0;
+	Vulkan::SamplerHandle aniso_sampler;
+
+	// Road Trip recomp (texture dumps and packs): each newly decoded texture copied back to the
+	// host. A batch completes with the vsync after it was recorded.
+public:
+	struct TextureReadback
+	{
+		uint64_t hash;   // the texture cache key (TextureDescriptor::hash)
+		uint64_t stable; // TextureDescriptor::stable_key()
+		uint32_t width, height, psm, cpsm;
+		Vulkan::BufferHandle buffer; // RGBA8, PS2 alpha scale (0x80 = 1.0), width * height * 4
+	};
+	void set_texture_readback(bool enable) { texture_readback = enable; }
+	// Completed readbacks since the last call (GS thread, device lock held).
+	void collect_texture_readbacks(std::vector<TextureReadback> &out);
+	void close_readback_batch_public() { close_readback_batch(); }
+private:
+	bool texture_readback = false;
+	std::vector<TextureReadback> readbacks_recording;
+	struct ReadbackBatch
+	{
+		Vulkan::Fence fence;
+		std::vector<TextureReadback> items;
+	};
+	std::vector<ReadbackBatch> readback_batches;
+	void record_texture_readbacks(Vulkan::CommandBuffer &cmd);
+	void close_readback_batch();
 	// False for a second renderer on a device another one drives (Road Trip recomp: shadow
 	// frames): its submits don't advance the device's frame contexts, each of which waits for the
 	// GPU work of an older context.

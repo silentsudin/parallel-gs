@@ -106,6 +106,8 @@ struct TexInfo
 
 CONSTEXPR int TEX_INFO_FORCE_SAMPLE_MAPPING = 0x1;
 CONSTEXPR int TEX_INFO_LONG_TERM_REFERENCE = 0x2;
+// Road Trip recomp (texture packs): sampled from a larger replacement image; no 1/16-texel snap.
+CONSTEXPR int TEX_INFO_REPLACED = 0x4;
 
 CONSTEXPR int PGS_FB_SWIZZLE_WIDTH_LOG2 = 3;
 CONSTEXPR int PGS_FB_SWIZZLE_HEIGHT_LOG2 = 3;
@@ -382,6 +384,8 @@ CONSTEXPR int AFAIL_RGB_ONLY = 3;
 #define BINDING_SAMPLER_COUNT 2
 
 #define BINDING_CLUT 14
+// Road Trip recomp: anisotropic, trilinear sampler for replacement textures (texture packs).
+#define BINDING_SAMPLER_ANISO 26
 #define BINDING_TEXTURE_INFO 15
 
 #define BINDING_FEEDBACK_COLOR 16

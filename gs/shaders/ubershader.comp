@@ -1065,7 +1065,29 @@ vec4 feedback_texture(uint tex_index, uint tex2)
 	return vec4(color);
 }
 
-vec4 sample_texture(uint tex_word, uint filtering, vec2 uv, float q, bool perspective)
+// Texture-coordinate gradients per sample step, for replacement textures: the barycentrics are
+// linear in the sample coordinate (evaluate_barycentric_ij), STQ linear in the barycentrics.
+void texture_gradients(uint primitive_index, vec3 stq, vec3 stqf1, vec3 stqf2, bool perspective,
+                       out vec2 duv_dx, out vec2 duv_dy)
+{
+	PrimitiveSetup setup = primitive_setup.data[primitive_index];
+	float step = float(1 << (PGS_RASTER_SUBSAMPLE_BITS - SAMPLING_RATE_DIM_LOG2)) * setup.inv_area;
+	vec2 di = vec2(setup.b.xy) * step;
+	vec2 dj = vec2(setup.c.xy) * step;
+	vec3 dx = stqf1 * di.x + stqf2 * dj.x;
+	vec3 dy = stqf1 * di.y + stqf2 * dj.y;
+	duv_dx = dx.xy;
+	duv_dy = dy.xy;
+	if (perspective && stq.z != 1.0)
+	{
+		float rq2 = 1.0 / (stq.z * stq.z);
+		duv_dx = (dx.xy * stq.z - stq.xy * dx.z) * rq2;
+		duv_dy = (dy.xy * stq.z - stq.xy * dy.z) * rq2;
+	}
+}
+
+vec4 sample_texture(uint tex_word, uint filtering, vec2 uv, float q, bool perspective,
+                    uint primitive_index, vec3 stq, vec3 stqf1, vec3 stqf2)
 {
 	uint tex_index = bitfieldExtract(tex_word, TEX_TEXTURE_INDEX_OFFSET, TEX_TEXTURE_INDEX_BITS);
 
@@ -1087,6 +1109,25 @@ vec4 sample_texture(uint tex_word, uint filtering, vec2 uv, float q, bool perspe
 	vec4 size = tex_info.sizes;
 	vec4 region_coords = tex_info.region;
 	vec2 bias = tex_info.bias;
+
+	// A replacement image (texture packs) has its own mip chain: sampled with the primitive's
+	// texture-coordinate gradients through a trilinear, anisotropic sampler, in the original
+	// texture's texel space (no 1/16-texel snap, which would quantise it to coarse steps).
+	if ((tex_info.flags & TEX_INFO_REPLACED) != 0)
+	{
+		vec2 base = perspective ? size.xy : vec2(1.0);
+		vec2 t = uv * base;
+		if (sampler_clamp_s)
+			t.x = clamp(t.x, region_coords.x, region_coords.z + 1.0);
+		if (sampler_clamp_t)
+			t.y = clamp(t.y, region_coords.y, region_coords.w + 1.0);
+		vec2 n = t * size.zw + bias;
+		vec2 duv_dx, duv_dy;
+		texture_gradients(primitive_index, stq, stqf1, stqf2, perspective, duv_dx, duv_dy);
+		vec2 gx = duv_dx * base * size.zw;
+		vec2 gy = duv_dy * base * size.zw;
+		return roundEven(255.0 * textureGrad(sampler2D(bindless_textures[tex_index], aniso_sampler), n, gx, gy));
+	}
 
 	// LOD calculation
 
@@ -1328,7 +1369,7 @@ vec4 compute_combined_color(
 		uv = spvNClamp(uv, vec2(-2047.0), vec2(2047.0));
 
 		uint tex2 = primitive_attr.data[primitive_index].tex2;
-		vec4 sampled = sample_texture(tex, tex2, uv, stq.z, perspective);
+		vec4 sampled = sample_texture(tex, tex2, uv, stq.z, perspective, primitive_index, stq, stqf1.xyz, stqf2.xyz);
 		switch (mode)
 		{
 		case COMBINER_DECAL:

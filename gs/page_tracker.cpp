@@ -831,6 +831,15 @@ Vulkan::ImageHandle PageTracker::find_cached_texture(Util::Hash hash) const
 	return cached_texture->image;
 }
 
+bool PageTracker::replace_cached_texture(Util::Hash hash, Vulkan::ImageHandle image)
+{
+	auto *cached_texture = cached_textures.find(hash);
+	if (!cached_texture || !image)
+		return false;
+	cached_texture->image = std::move(image);
+	return true;
+}
+
 void PageTracker::garbage_collect_texture_masked_handles(std::vector<CachedTextureMasked> &textures)
 {
 	auto itr = Util::unstable_remove_if(textures.begin(), textures.end(), [](const CachedTextureMasked &masked) {

@@ -1771,16 +1771,32 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 				state_tracker.texflush_counter, long_term_cache_texture);
 		}
 
+		// A predicted replacement (texture packs): bind it for this decode too. The decode itself
+		// still runs (its readback checks the prediction), into the original image.
+		if (!texture_predictions.empty())
+		{
+			auto it = texture_predictions.find(desc.stable_key());
+			if (it != texture_predictions.end() && image.get() != it->second.get())
+			{
+				if (long_term_cache_texture && desc.samples == 1)
+					tracker.replace_cached_texture(hasher.get(), it->second);
+				image = it->second;
+			}
+		}
+
 		TextureInfo info = {};
 		info.view = &image->get_view();
-		info.info.sizes = vec4(float(width), float(height),
-							   1.0f / float(info.view->get_view_width()),
-							   1.0f / float(info.view->get_view_height()));
+		// A replacement image (texture packs) is larger than the texture: address it by the
+		// texture's own size (normalised coordinates sample the whole image).
+		const bool replaced = !(image->get_create_info().usage & VK_IMAGE_USAGE_STORAGE_BIT);
+		const uint32_t view_w = replaced ? desc.rect.width : info.view->get_view_width();
+		const uint32_t view_h = replaced ? desc.rect.height : info.view->get_view_height();
+		info.info.sizes = vec4(float(width), float(height), 1.0f / float(view_w), 1.0f / float(view_h));
 
 		if (uint32_t(desc.clamp.desc.WMS) == CLAMPBits::CLAMP)
 		{
 			info.info.region.x = 0.0f;
-			info.info.region.z = float(info.view->get_view_width()) - 1.0f;
+			info.info.region.z = float(view_w) - 1.0f;
 		}
 		else if (uint32_t(desc.clamp.desc.WMS) == CLAMPBits::REGION_CLAMP)
 		{
@@ -1791,7 +1807,7 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 		if (uint32_t(desc.clamp.desc.WMT) == CLAMPBits::CLAMP)
 		{
 			info.info.region.y = 0.0f;
-			info.info.region.w = float(info.view->get_view_height()) - 1.0f;
+			info.info.region.w = float(view_h) - 1.0f;
 		}
 		else if (uint32_t(desc.clamp.desc.WMT) == CLAMPBits::REGION_CLAMP)
 		{
@@ -1804,6 +1820,8 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 
 		info.info.arrayed = int(desc.samples > 1);
 		info.info.flags = long_term_cache_texture ? TEX_INFO_LONG_TERM_REFERENCE : 0;
+		if (!(image->get_create_info().usage & VK_IMAGE_USAGE_STORAGE_BIT))
+			info.info.flags |= TEX_INFO_REPLACED;
 		if (info.info.arrayed)
 			render_pass.tex_infos_has_super_samples = true;
 
@@ -4708,7 +4726,32 @@ ScanoutResult GSInterface::vsync(const VSyncInfo &info_)
 
 	// Restore FFMD state.
 	priv_registers.smode2.FFMD = ffmd;
+	// Texture readbacks recorded this frame complete with the work just submitted.
+	renderer.close_readback_batch_public();
 	return result;
+}
+
+void GSInterface::set_texture_readback(bool enable)
+{
+	renderer.set_texture_readback(enable);
+}
+
+void GSInterface::collect_texture_readbacks(std::vector<GSRenderer::TextureReadback> &out)
+{
+	renderer.collect_texture_readbacks(out);
+}
+
+void GSInterface::set_texture_prediction(uint64_t stable_key, Vulkan::ImageHandle image)
+{
+	if (image)
+		texture_predictions[stable_key] = std::move(image);
+	else
+		texture_predictions.erase(stable_key);
+}
+
+bool GSInterface::replace_cached_texture(uint64_t hash, Vulkan::ImageHandle image)
+{
+	return tracker.replace_cached_texture(Util::Hash(hash), std::move(image));
 }
 
 bool GSInterface::vsync_can_skip(const VSyncInfo &info) const

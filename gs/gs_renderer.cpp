@@ -1317,8 +1317,66 @@ TexRect GSRenderer::compute_effective_texture_rect(const TextureDescriptor &desc
 	return rect;
 }
 
+void GSRenderer::record_texture_readbacks(Vulkan::CommandBuffer &cmd)
+{
+	// Fully decoded, single-sampled textures only (sampler-feedback ones are decoded in part).
+	unsigned count = 0;
+	for (auto &upload : texture_uploads)
+	{
+		if (upload.indirection.buffer || upload.desc.samples > 1 || !upload.image)
+			continue;
+		if (++count > 64) // a burst at a scene load: the rest come back when they are decoded again
+			break;
+		const uint32_t w = upload.image->get_width(), h = upload.image->get_height();
+		Vulkan::BufferCreateInfo info = {};
+		info.size = VkDeviceSize(w) * h * 4;
+		info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		info.domain = Vulkan::BufferDomain::CachedHost;
+		auto buffer = device->create_buffer(info);
+		cmd.image_barrier(*upload.image, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_COPY_BIT,
+		                  VK_ACCESS_2_TRANSFER_READ_BIT);
+		cmd.copy_image_to_buffer(*buffer, *upload.image, 0, {}, { w, h, 1 }, 0, 0,
+		                         { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
+		cmd.image_barrier(*upload.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+		                  VK_PIPELINE_STAGE_2_COPY_BIT, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+		                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+		readbacks_recording.push_back({ upload.desc.hash, upload.desc.stable_key(), w, h, uint32_t(upload.desc.tex0.desc.PSM),
+		                                uint32_t(upload.desc.tex0.desc.CPSM), std::move(buffer) });
+	}
+	if (count)
+		cmd.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+		            VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+}
+
+void GSRenderer::close_readback_batch()
+{
+	if (readbacks_recording.empty())
+		return;
+	ReadbackBatch batch;
+	device->submit_empty(Vulkan::CommandBuffer::Type::Generic, &batch.fence, nullptr);
+	batch.items = std::move(readbacks_recording);
+	readbacks_recording.clear();
+	readback_batches.push_back(std::move(batch));
+}
+
+void GSRenderer::collect_texture_readbacks(std::vector<TextureReadback> &out)
+{
+	size_t done = 0;
+	while (done < readback_batches.size() && readback_batches[done].fence->wait_timeout(0))
+	{
+		for (auto &item : readback_batches[done].items)
+			out.push_back(std::move(item));
+		done++;
+	}
+	readback_batches.erase(readback_batches.begin(), readback_batches.begin() + done);
+}
+
 void GSRenderer::recycle_image_handle(Vulkan::ImageHandle image)
 {
+	// Replacement images (texture packs) are not ours to reuse: they have no storage usage.
+	if (!(image->get_create_info().usage & VK_IMAGE_USAGE_STORAGE_BIT))
+		return;
 	// Have to defer this until render pass is flushed, since an invalidate doesn't mean the texture is
 	// immune from reuse.
 	if (Util::is_pow2(image->get_width()) && Util::is_pow2(image->get_height()) &&
@@ -1718,6 +1776,22 @@ void GSRenderer::bind_frame_resources(const RenderPass &rp)
 	cmd.set_storage_buffer(0, BINDING_CLUT, *buffers.clut);
 	cmd.set_sampler(0, BINDING_SAMPLER_NEAREST, Vulkan::StockSampler::NearestWrap);
 	cmd.set_sampler(0, BINDING_SAMPLER_LINEAR, Vulkan::StockSampler::LinearWrap);
+	if (!aniso_sampler || aniso_sampler_level != anisotropy)
+	{
+		Vulkan::SamplerCreateInfo info = {};
+		info.mag_filter = VK_FILTER_LINEAR;
+		info.min_filter = VK_FILTER_LINEAR;
+		info.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		info.address_mode_u = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		info.address_mode_v = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		info.address_mode_w = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		info.max_lod = VK_LOD_CLAMP_NONE;
+		info.anisotropy_enable = anisotropy > 1 && device->get_device_features().enabled_features.samplerAnisotropy;
+		info.max_anisotropy = float(anisotropy);
+		aniso_sampler = device->create_sampler(info);
+		aniso_sampler_level = anisotropy;
+	}
+	cmd.set_sampler(0, BINDING_SAMPLER_ANISO, *aniso_sampler);
 
 	cmd.set_storage_buffer(0, BINDING_VRAM, *buffers.gpu);
 	if (!buffers.motion_dummy)
@@ -3960,6 +4034,9 @@ void GSRenderer::flush_cache_upload()
 	dep.imageMemoryBarrierCount = post_image_barriers.size();
 	dep.pImageMemoryBarriers = post_image_barriers.data();
 	cmd.barrier(dep);
+
+	if (texture_readback)
+		record_texture_readbacks(cmd);
 
 	texture_uploads.clear();
 	pre_image_barriers.clear();

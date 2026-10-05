@@ -13,6 +13,7 @@
 #include "dynamic_array.hpp"
 #include <stddef.h>
 #include <vector>
+#include <unordered_map>
 #include <type_traits>
 
 namespace ParallelGS
@@ -280,6 +281,21 @@ public:
 	SuperSampling get_max_supported_super_sampling() const;
 	// See GSRenderer::owns_frame_contexts.
 	void set_owns_frame_contexts(bool owns);
+	// Road Trip recomp (texture dumps and packs): copy each newly decoded texture back to the host
+	// (completed batches come out of collect_texture_readbacks a vsync or so later), and sample a
+	// cached texture (by its cache key) from another image, e.g. a larger replacement made without
+	// storage usage. The image's size may differ: texel addressing stays the original texture's.
+	void set_texture_readback(bool enable);
+	// Ends this frame's batch of readbacks early (vsync does it otherwise), after a flush.
+	void close_texture_readbacks() { renderer.close_readback_batch_public(); }
+	// Anisotropy of replacement-texture sampling (1 = trilinear only).
+	void set_anisotropy(uint32_t level) { renderer.set_anisotropy(level); }
+	void collect_texture_readbacks(std::vector<GSRenderer::TextureReadback> &out);
+	bool replace_cached_texture(uint64_t hash, Vulkan::ImageHandle image);
+	// Bind `image` for every texture decoded from now on with this stable key (null: stop). Set
+	// once a readback showed the key's content has a replacement; textures whose palette is
+	// reloaded every frame are decoded under a new cache key every frame.
+	void set_texture_prediction(uint64_t stable_key, Vulkan::ImageHandle image);
 	void set_debug_mode(const DebugMode &mode);
 	void set_hacks(const Hacks &hacks);
 
@@ -351,6 +367,7 @@ private:
 
 	PageTracker tracker;
 	GSRenderer renderer;
+	std::unordered_map<uint64_t, Vulkan::ImageHandle> texture_predictions;
 	uint32_t vram_size = 0;
 	DebugMode debug_mode;
 	Hacks hacks;
