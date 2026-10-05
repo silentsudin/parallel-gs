@@ -1553,8 +1553,46 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 	if (!desc.tex1.desc.mmin_has_mipmap() || hacks.disable_mipmaps)
 		desc.tex1.desc.MXL = 0;
 
+	// Road Trip recomp (texture dumps and packs): decode the whole image the game uploaded at
+	// TBP, not just the part this draw samples (a sprite picked out with REGION_CLAMP). Every
+	// draw from one upload then shares one image: one dump name, one replacement. The draw keeps
+	// its own descriptor (and so its own sampler region); decode_clamp describes the image.
+	bool widened = false;
+	auto decode_clamp = desc.clamp;
+	if ((texture_readback || !texture_predictions.empty()) && desc.samples == 1 && !uploads.empty())
+	{
+		auto up = uploads.find(uint32_t(desc.tex0.desc.TBP0));
+		if (up != uploads.end() && up->second.psm == psm && up->second.width && up->second.height)
+		{
+			const TexRect sampled = GSRenderer::compute_effective_texture_rect(desc);
+			// Not where the game has drawn (render targets: paraLLEl-GS treats those pages specially,
+			// e.g. as super-sampled textures, and packs can't replace them anyway).
+			const PageRect whole = compute_page_rect(uint32_t(desc.tex0.desc.TBP0), 0, 0, up->second.width, up->second.height,
+			                                         uint32_t(desc.tex0.desc.TBW), psm);
+			if (sampled.x + sampled.width <= up->second.width && sampled.y + sampled.height <= up->second.height &&
+			    (sampled.width != up->second.width || sampled.height != up->second.height || sampled.x || sampled.y) &&
+			    desc.clamp.desc.WMS == CLAMPBits::REGION_CLAMP && desc.clamp.desc.WMT == CLAMPBits::REGION_CLAMP &&
+			    !tracker.texture_may_super_sample(whole) && !tracker.page_has_fb_write(whole))
+			{
+				decode_clamp.desc.WMS = CLAMPBits::REGION_CLAMP;
+				decode_clamp.desc.MINU = 0;
+				decode_clamp.desc.MAXU = up->second.width - 1;
+				decode_clamp.desc.WMT = CLAMPBits::REGION_CLAMP;
+				decode_clamp.desc.MINV = 0;
+				decode_clamp.desc.MAXV = up->second.height - 1;
+				widened = true;
+			}
+		}
+	}
+
 	// Memoize this computation.
 	state_tracker.tex.rect = desc.rect = GSRenderer::compute_effective_texture_rect(desc);
+	if (widened)
+	{
+		auto decode = desc;
+		decode.clamp = decode_clamp;
+		state_tracker.tex.rect = GSRenderer::compute_effective_texture_rect(decode);
+	}
 	state_tracker.tex.levels[0].base = desc.tex0.desc.TBP0;
 	state_tracker.tex.levels[0].stride = desc.tex0.desc.TBW;
 
@@ -1630,7 +1668,29 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 	// live as long as we can maintain the render pass.
 	hasher.u64(desc.palette_bank);
 	hasher.u32(desc.samples);
-	auto *cached_index = render_pass.texture_map.find(hasher.get());
+
+	// The image's descriptor and cache key (differs from the draw's when widened).
+	TextureDescriptor decode_desc = desc;
+	Util::Hash image_hash = hasher.get();
+	if (widened)
+	{
+		decode_desc.clamp = decode_clamp;
+		decode_desc.rect = state_tracker.tex.rect;
+		Util::Hasher image_hasher;
+		image_hasher.u64(decode_desc.tex0.bits);
+		image_hasher.u64(decode_desc.tex1.bits);
+		image_hasher.u64(decode_desc.texa.bits);
+		image_hasher.u64(decode_desc.miptbp1_3.bits);
+		image_hasher.u64(decode_desc.miptbp4_6.bits);
+		image_hasher.u64(decode_desc.clamp.bits);
+		image_hasher.u64(decode_desc.palette_bank);
+		image_hasher.u32(decode_desc.samples);
+		image_hash = image_hasher.get();
+	}
+
+	// A widened image is invalidated by its own key, which the render pass map (keyed by the
+	// draw's descriptor) would not see: widened draws always go through the image cache.
+	auto *cached_index = widened ? nullptr : render_pass.texture_map.find(hasher.get());
 
 	// For explicit feedback, we have to be super careful, and we skip these checks.
 	// This is mostly relevant for potential feedback and textures placed at an address
@@ -1653,7 +1713,7 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 		}
 
 		// The render pass might have been flushed, have to requery.
-		cached_index = render_pass.texture_map.find(hasher.get());
+		cached_index = widened ? nullptr : render_pass.texture_map.find(hasher.get());
 
 		// We started long-term, but now we're rendering on top of it in sliced mode, cannot use this reference.
 		if (cached_index && cached_index->valid && cached_index->long_term && !long_term_cache_texture)
@@ -1713,12 +1773,13 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 			}
 		}
 
-		auto image = tracker.find_cached_texture(hasher.get());
+		auto image = tracker.find_cached_texture(image_hash);
 		if (!image)
 		{
 			TRACE("CACHE IMAGE", desc);
 			desc.hash = hasher.get();
-			image = renderer.create_cached_texture(desc);
+			decode_desc.hash = image_hash;
+			image = renderer.create_cached_texture(decode_desc);
 
 			// Long-term references can persist across render passes, and intended for normal resource textures.
 			// They will generally be invalidated when it's overwritten by a copy or FB write.
@@ -1738,7 +1799,7 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 				{
 					if (tracker.register_cached_texture(state_tracker.tex.page_rects, desc.rect.levels,
 														csa_mask, render_pass.clut_instance,
-														hasher.get(), image) == PageTracker::UploadStrategy::CPU)
+														image_hash, image) == PageTracker::UploadStrategy::CPU)
 					{
 						renderer.promote_cached_texture_upload_cpu(state_tracker.tex.page_rects[0]);
 					}
@@ -1748,13 +1809,15 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 			{
 				// Potential feedback textures are handled explicitly w.r.t. FB hazards,
 				// but we still need to consider potential copy hazards.
-				tracker.register_short_term_cached_texture(state_tracker.tex.page_rects, desc.rect.levels, hasher.get());
+				tracker.register_short_term_cached_texture(state_tracker.tex.page_rects, desc.rect.levels, image_hash);
 				recycle_image_handle(image);
 			}
 
+			// A widened texture is shared by draws sampling different parts of it: decode all of
+			// it (sampler feedback decodes only what the first draw samples).
 			renderer.commit_cached_texture(render_pass.tex_infos.size(),
 			                               desc.rect.levels == 1 && !long_term_cache_texture &&
-			                               !debug_mode.disable_sampler_feedback);
+			                               !debug_mode.disable_sampler_feedback && !widened);
 		}
 
 		texture_index = render_pass.tex_infos.size();
@@ -1765,7 +1828,7 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 			cached_index->index = texture_index;
 			cached_index->valid = true;
 		}
-		else
+		else if (!widened)
 		{
 			render_pass.texture_map.emplace_replace(hasher.get(), texture_index,
 				state_tracker.texflush_counter, long_term_cache_texture);
@@ -1775,11 +1838,11 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 		// still runs (its readback checks the prediction), into the original image.
 		if (!texture_predictions.empty())
 		{
-			auto it = texture_predictions.find(desc.stable_key());
+			auto it = texture_predictions.find(decode_desc.stable_key());
 			if (it != texture_predictions.end() && image.get() != it->second.get())
 			{
 				if (long_term_cache_texture && desc.samples == 1)
-					tracker.replace_cached_texture(hasher.get(), it->second);
+					tracker.replace_cached_texture(image_hash, it->second);
 				image = it->second;
 			}
 		}
@@ -1789,8 +1852,8 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 		// A replacement image (texture packs) is larger than the texture: address it by the
 		// texture's own size (normalised coordinates sample the whole image).
 		const bool replaced = !(image->get_create_info().usage & VK_IMAGE_USAGE_STORAGE_BIT);
-		const uint32_t view_w = replaced ? desc.rect.width : info.view->get_view_width();
-		const uint32_t view_h = replaced ? desc.rect.height : info.view->get_view_height();
+		const uint32_t view_w = replaced ? decode_desc.rect.width : info.view->get_view_width();
+		const uint32_t view_h = replaced ? decode_desc.rect.height : info.view->get_view_height();
 		info.info.sizes = vec4(float(width), float(height), 1.0f / float(view_w), 1.0f / float(view_h));
 
 		if (uint32_t(desc.clamp.desc.WMS) == CLAMPBits::CLAMP)
@@ -1815,8 +1878,8 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode, 
 			info.info.region.w = float(uint32_t(desc.clamp.desc.MAXV));
 		}
 
-		info.info.bias.x = -float(desc.rect.x) * info.info.sizes.z;
-		info.info.bias.y = -float(desc.rect.y) * info.info.sizes.w;
+		info.info.bias.x = -float(decode_desc.rect.x) * info.info.sizes.z;
+		info.info.bias.y = -float(decode_desc.rect.y) * info.info.sizes.w;
 
 		info.info.arrayed = int(desc.samples > 1);
 		info.info.flags = long_term_cache_texture ? TEX_INFO_LONG_TERM_REFERENCE : 0;
@@ -3215,6 +3278,19 @@ void GSInterface::init_transfer()
 	transfer_state.copy.bitbltbuf = registers.bitbltbuf;
 
 	auto XDIR = transfer_state.copy.trxdir.desc.XDIR;
+
+	// Road Trip recomp (texture packs): the images the game uploads, by base address. A texture
+	// is identified by the whole upload it is drawn from (see drawing_kick_update_texture).
+	if (XDIR == HOST_TO_LOCAL)
+	{
+		const auto &bb = transfer_state.copy.bitbltbuf.desc;
+		const auto &pos = transfer_state.copy.trxpos.desc;
+		if (pos.DSAX == 0 && pos.DSAY == 0)
+			uploads[uint32_t(bb.DBP)] = { uint32_t(bb.DPSM), uint32_t(transfer_state.copy.trxreg.desc.RRW),
+			                              uint32_t(transfer_state.copy.trxreg.desc.RRH) };
+	}
+	else if (XDIR == LOCAL_TO_LOCAL)
+		uploads.erase(uint32_t(transfer_state.copy.bitbltbuf.desc.DBP));
 
 	if (XDIR == LOCAL_TO_LOCAL)
 	{
@@ -4733,6 +4809,7 @@ ScanoutResult GSInterface::vsync(const VSyncInfo &info_)
 
 void GSInterface::set_texture_readback(bool enable)
 {
+	texture_readback = enable;
 	renderer.set_texture_readback(enable);
 }
 

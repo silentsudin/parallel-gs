@@ -368,6 +368,10 @@ private:
 	void mark_texture_state_dirty_with_flush();
 
 	PageTracker tracker;
+	// Road Trip recomp (texture dumps and packs): uploads by base address, readback on.
+	struct UploadExtent { uint32_t psm, width, height; };
+	std::unordered_map<uint32_t, UploadExtent> uploads;
+	bool texture_readback = false;
 	GSRenderer renderer;
 	std::unordered_map<uint64_t, Vulkan::ImageHandle> texture_predictions;
 	uint32_t vram_size = 0;
