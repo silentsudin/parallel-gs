@@ -4384,8 +4384,11 @@ void GSRenderer::set_motion_enabled(bool enable)
 		buffers.motion = device->create_buffer(info);
 		device->set_name(*buffers.motion, "motion");
 		info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-		buffers.motion_snapshot = device->create_buffer(info);
-		device->set_name(*buffers.motion_snapshot, "motion-snapshot");
+		for (auto &snapshot : buffers.motion_snapshot)
+		{
+			snapshot = device->create_buffer(info);
+			device->set_name(*snapshot, "motion-snapshot");
+		}
 		// One uint per colour word (16-bit formats address in halves: twice the words).
 		info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 		info.size = VkDeviceSize(vram_size) * 2;
@@ -4395,7 +4398,7 @@ void GSRenderer::set_motion_enabled(bool enable)
 	motion_enabled = enable;
 }
 
-void GSRenderer::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height)
+void GSRenderer::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height, uint32_t slot)
 {
 	if (!device)
 		return;
@@ -4403,15 +4406,16 @@ void GSRenderer::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height)
 	auto &cmd = *direct_cmd;
 
 	const VkDeviceSize main_size = buffers.gpu->get_create_info().size / 2; // without the hazard shadow copy
-	if (!buffers.depth_snapshot)
+	Vulkan::BufferHandle &depth_snapshot = buffers.depth_snapshot[slot];
+	if (!depth_snapshot)
 	{
 		Vulkan::BufferCreateInfo info = {};
 		info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 		info.size = main_size;
 		info.domain = Vulkan::BufferDomain::Device;
 		info.misc = Vulkan::BUFFER_MISC_ZERO_INITIALIZE_BIT;
-		buffers.depth_snapshot = device->create_buffer(info);
-		device->set_name(*buffers.depth_snapshot, "depth-snapshot");
+		depth_snapshot = device->create_buffer(info);
+		device->set_name(*depth_snapshot, "depth-snapshot");
 	}
 
 	// Pages of 8 KiB; 32-line pages for 24/32-bit Z (16-bit Z pages are taller, so this covers them).
@@ -4423,12 +4427,12 @@ void GSRenderer::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height)
 	cmd.barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
 	            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
 	for (VkDeviceSize slice = 0; slice < main_size / vram_size; slice++)
-		cmd.copy_buffer(*buffers.depth_snapshot, slice * vram_size + offset, *buffers.gpu, slice * vram_size + offset, size);
+		cmd.copy_buffer(*depth_snapshot, slice * vram_size + offset, *buffers.gpu, slice * vram_size + offset, size);
 	if (motion_enabled)
 	{
 		const VkDeviceSize motion_size = buffers.motion->get_create_info().size;
 		for (VkDeviceSize slice = 0; slice < motion_size / vram_size; slice++)
-			cmd.copy_buffer(*buffers.motion_snapshot, slice * vram_size + offset, *buffers.motion, slice * vram_size + offset, size);
+			cmd.copy_buffer(*buffers.motion_snapshot[slot], slice * vram_size + offset, *buffers.motion, slice * vram_size + offset, size);
 	}
 	cmd.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 	            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
@@ -4519,7 +4523,7 @@ void GSRenderer::merge_circuit1(Vulkan::CommandBuffer &cmd, Vulkan::ImageHandle 
 
 void GSRenderer::sample_crtc_depth(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
                                    uint32_t zbp, uint32_t zpsm, const SamplingRect &rect, uint32_t super_samples,
-                                   bool motion)
+                                   uint32_t slot, bool motion)
 {
 	cmd.image_barrier(img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
 	                  0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
@@ -4534,9 +4538,10 @@ void GSRenderer::sample_crtc_depth(Vulkan::CommandBuffer &cmd, const Vulkan::Ima
 	cmd.set_opaque_sprite_state();
 	cmd.set_program(motion ? sample_motion_quad : sample_depth_quad);
 	// The snapshot taken when the frame was finished (the game clears Z for the next one early).
-	cmd.set_storage_buffer(0, 0, buffers.depth_snapshot ? *buffers.depth_snapshot : *buffers.gpu);
+	slot &= 1u;
+	cmd.set_storage_buffer(0, 0, buffers.depth_snapshot[slot] ? *buffers.depth_snapshot[slot] : *buffers.gpu);
 	if (motion)
-		cmd.set_storage_buffer(0, 1, *buffers.motion_snapshot);
+		cmd.set_storage_buffer(0, 1, *buffers.motion_snapshot[slot]);
 
 	auto valid_extent = rect.valid_extent;
 	if (super_samples > 1)
@@ -5068,7 +5073,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 				depth_info.format = VK_FORMAT_R32_SFLOAT;
 				depth_info.misc = 0;
 				depth_circuit1 = device->create_image(depth_info);
-				sample_crtc_depth(cmd, *depth_circuit1, priv.dispfb1, info.depth_zbp, info.depth_psm, rect, super_samples);
+				sample_crtc_depth(cmd, *depth_circuit1, priv.dispfb1, info.depth_zbp, info.depth_psm, rect, super_samples,
+				                  info.depth_slot);
 				device->set_name(*depth_circuit1, "DepthCircuit1");
 			}
 			if (info.scanout_ui && motion_enabled && buffers.ui_mask)
@@ -5080,13 +5086,14 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
 				sample_crtc_ui(cmd, *ui_circuit1, priv.dispfb1, rect, super_samples);
 				device->set_name(*ui_circuit1, "UiCircuit1");
 			}
-			if (info.scanout_motion && motion_enabled && buffers.motion_snapshot)
+			if (info.scanout_motion && motion_enabled && buffers.motion_snapshot[info.depth_slot & 1u])
 			{
 				auto motion_info = image_info;
 				motion_info.format = VK_FORMAT_R16G16_SFLOAT;
 				motion_info.misc = 0;
 				motion_circuit1 = device->create_image(motion_info);
-				sample_crtc_depth(cmd, *motion_circuit1, priv.dispfb1, info.depth_zbp, info.depth_psm, rect, super_samples, true);
+				sample_crtc_depth(cmd, *motion_circuit1, priv.dispfb1, info.depth_zbp, info.depth_psm, rect, super_samples,
+				                  info.depth_slot, true);
 				device->set_name(*motion_circuit1, "MotionCircuit1");
 			}
 		}

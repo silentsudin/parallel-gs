@@ -336,7 +336,7 @@ public:
 	// Copies the Z buffer's pages (all sample slices) aside, for a later depth scanout.
 	// Per-pixel motion from VertexPosition.padding (Road Trip recomp).
 	void set_motion_enabled(bool enable);
-	void snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height);
+	void snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height, uint32_t slot);
 	ScanoutResult vsync(const PrivRegisterState &priv, const VSyncInfo &info,
 	                    uint32_t sampling_rate_x_log2, uint32_t sampling_rate_y_log2,
 	                    const Vulkan::Image *promoted1, const Vulkan::Image *promoted2);
@@ -433,9 +433,11 @@ private:
 	{
 		Vulkan::BufferHandle clut;
 		Vulkan::BufferHandle gpu;
-		Vulkan::BufferHandle depth_snapshot; // VRAM-shaped, Z pages only (snapshot_depth)
+		// VRAM-shaped, Z pages only (snapshot_depth), one per slot: the frame on display and the
+		// one being drawn.
+		Vulkan::BufferHandle depth_snapshot[2];
 		Vulkan::BufferHandle motion;          // per-pixel motion, Z-shaped (1 + samples slices)
-		Vulkan::BufferHandle motion_snapshot;
+		Vulkan::BufferHandle motion_snapshot[2];
 		Vulkan::BufferHandle motion_dummy;    // bound while motion is off
 		Vulkan::BufferHandle ui_mask;         // per colour word: 1 = last written by the UI
 		Vulkan::BufferHandle cpu;
@@ -540,7 +542,7 @@ private:
 
 	void sample_crtc_depth(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
 	                       uint32_t zbp, uint32_t zpsm, const SamplingRect &rect, uint32_t super_samples,
-	                       bool motion = false);
+	                       uint32_t slot, bool motion = false);
 	void sample_crtc_ui(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
 	                    const SamplingRect &rect, uint32_t super_samples);
 	void merge_circuit1(Vulkan::CommandBuffer &cmd, Vulkan::ImageHandle &out, const Vulkan::ImageCreateInfo &info,

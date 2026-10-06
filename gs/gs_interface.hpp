@@ -206,6 +206,8 @@ struct VSyncInfo
 	// Also scan out per-pixel screen motion (needs set_motion_enabled and the depth fields) into
 	// ScanoutResult::motion.
 	bool scanout_motion = false;
+	// The snapshot_depth slot to scan depth and motion out of.
+	uint32_t depth_slot = 0;
 	// Also scan out the UI mask (1 where the UI drew last; needs set_motion_enabled) into
 	// ScanoutResult::ui.
 	bool scanout_ui = false;
@@ -348,9 +350,12 @@ public:
 	const GIFPath &get_gif_path(uint32_t path) const;
 
 	ScanoutResult vsync(const VSyncInfo &info);
-	// Road Trip recomp: keep the Z buffer of the frame just finished for VSyncInfo::scanout_depth
-	// (games clear Z for the next frame before it is displayed). Call after flush().
-	void snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height);
+	// Road Trip recomp: keep the Z buffer (and motion) of the frame just finished for
+	// VSyncInfo::scanout_depth (games clear Z for the next frame before it is displayed), in slot
+	// 0 or 1: the caller keeps one per frame buffer and scans out the displayed one's
+	// (VSyncInfo::depth_slot), since the next frame may be finished before this one is shown.
+	// Call after flush().
+	void snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height, uint32_t slot = 0);
 	// Per-vertex screen motion (packed half2, GS pixels) for the vertices of the next gif_transfer,
 	// in kick order, carried in VertexPosition.padding and written per pixel where Z is written.
 	void set_motion_enabled(bool enable);

@@ -4882,9 +4882,9 @@ void GSInterface::set_signal_interface(SignalInterface *iface)
 }
 }
 
-void ParallelGS::GSInterface::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height)
+void ParallelGS::GSInterface::snapshot_depth(uint32_t zbp, uint32_t fbw, uint32_t height, uint32_t slot)
 {
-	renderer.snapshot_depth(zbp, fbw, height);
+	renderer.snapshot_depth(zbp, fbw, height, slot & 1u);
 }
 
 void ParallelGS::GSInterface::set_motion_enabled(bool enable)
