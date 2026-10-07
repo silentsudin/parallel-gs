@@ -1120,13 +1120,23 @@ vec4 sample_texture(uint tex_word, uint filtering, vec2 uv, float q, bool perspe
 	{
 		vec2 base = perspective ? size.xy : vec2(1.0);
 		vec2 t = uv * base;
-		if (sampler_clamp_s)
-			t.x = clamp(t.x, region_coords.x, region_coords.z + 1.0);
-		if (sampler_clamp_t)
-			t.y = clamp(t.y, region_coords.y, region_coords.w + 1.0);
-		vec2 n = t * size.zw + bias;
 		vec2 duv_dx, duv_dy;
 		texture_gradients(primitive_index, stq, stqf1, stqf2, perspective, duv_dx, duv_dy);
+		// Clamped axes stay inside the texels the GS could reach, inset so the filter footprint
+		// (half a pack texel when magnified, half the pixel's footprint when minified) never
+		// reaches past them: the image is often a whole atlas upload, and the GS point-sampled
+		// the region where we filter (a line of the neighbouring sprite showed beside HUD parts).
+		if (sampler_clamp_s || sampler_clamp_t)
+		{
+			vec2 half_texel = max(0.5 / (vec2(textureSize(sampler2D(bindless_textures[tex_index], aniso_sampler), 0)) * size.zw),
+			                      0.5 * max(abs(duv_dx * base), abs(duv_dy * base)));
+			vec2 h = min(half_texel, 0.5 * (region_coords.zw + 1.0 - region_coords.xy));
+			if (sampler_clamp_s)
+				t.x = clamp(t.x, region_coords.x + h.x, region_coords.z + 1.0 - h.x);
+			if (sampler_clamp_t)
+				t.y = clamp(t.y, region_coords.y + h.y, region_coords.w + 1.0 - h.y);
+		}
+		vec2 n = t * size.zw + bias;
 		vec2 gx = duv_dx * base * size.zw;
 		vec2 gy = duv_dy * base * size.zw;
 		// Clamped axes clamp to the edge at every mip level (repeat would blend in the far edge).
